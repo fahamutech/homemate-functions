@@ -1,0 +1,11 @@
+{
+  "name": "functions",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"no test\""
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "private": true
+}
