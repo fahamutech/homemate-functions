@@ -66,7 +66,23 @@ export function createCustomerAccessService({
     sessionTokens,
     now = () => new Date(),
     generateCode = defaultGenerateCode,
+    reviewAccount = null,
 }) {
+    /**
+     * Google Play reviews the app from outside Tanzania, on a device with no
+     * Tanzanian SIM, so a reviewer can never receive a real code — and an app
+     * whose every screen sits behind a login is rejected at the login screen.
+     *
+     * One number, named in configuration, therefore gets a code that is fixed
+     * instead of random and is not sent anywhere. It is not a bypass: the
+     * challenge is created, verified and consumed by exactly the same code
+     * path as everyone else, so the reviewer sees the real flow. The account
+     * is ordinary in every other respect, and unsetting the two variables
+     * removes it entirely.
+     */
+    const isReviewNumber = (phoneNumber) =>
+        reviewAccount?.phoneNumber != null && phoneNumber === reviewAccount.phoneNumber;
+
     /**
      * Sends a code, or explains why it will not. The quota answer carries a
      * retry time so the app can count down rather than just saying no, and a
@@ -77,7 +93,14 @@ export function createCustomerAccessService({
             throw invalidPhone();
         }
 
-        const quota = await repository.checkOtpQuota({phoneNumber, ipAddress, purpose});
+        const review = isReviewNumber(phoneNumber);
+
+        // The quota exists to stop an attacker spending SMS credit. The review
+        // number spends none, and a reviewer who re-runs the journey a dozen
+        // times must not find themselves locked out mid-review.
+        const quota = review
+            ? {allowed: true, retryAfterSeconds: 0}
+            : await repository.checkOtpQuota({phoneNumber, ipAddress, purpose});
         if (!quota.allowed) {
             await repository.logOtpRequest({
                 phoneNumber, ipAddress, purpose, outcome: 'throttled', reason: quota.reason,
@@ -99,7 +122,7 @@ export function createCustomerAccessService({
         }
 
         const settings = await repository.otpSettings();
-        const code = generateCode();
+        const code = review ? reviewAccount.code : generateCode();
         const expiresAt = new Date(now().getTime() + settings.ttlSeconds * 1000);
 
         const challenge = await repository.createChallenge({
@@ -111,6 +134,17 @@ export function createCustomerAccessService({
             ipAddress,
             userAgent,
         });
+
+        // Nothing to deliver: the code is already in the reviewer's hands, in
+        // the note we give Play.
+        if (review) {
+            await repository.logOtpRequest({phoneNumber, ipAddress, purpose, outcome: 'sent', reason: 'review account'});
+            return {
+                challengeId: challenge.id,
+                expiresAt: challenge.expires_at,
+                resendAfterSeconds: 0,
+            };
+        }
 
         let delivery;
         try {

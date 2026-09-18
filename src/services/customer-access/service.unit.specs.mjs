@@ -239,6 +239,48 @@ describe('customer access', () => {
             });
             assert.deepEqual(repository.state.logged.map((l) => l.outcome), ['failed']);
         });
+
+        test('the review number gets its fixed code, and no SMS is sent', async () => {
+            const repository = makeRepository();
+            const {service, notificationPort} = build({
+                repository,
+                reviewAccount: {phoneNumber: PHONE, code: '246810'},
+            });
+
+            const {challengeId} = await service.requestOtp({phoneNumber: PHONE});
+
+            assert.equal(notificationPort.sent.length, 0, 'a reviewer has no SIM to send to');
+            // The fixed code works, and the random one does not — the challenge
+            // really was created with the configured code.
+            await assert.rejects(service.verifyOtp({challengeId, code: '123456'}));
+            const {challengeId: second} = await service.requestOtp({phoneNumber: PHONE});
+            const result = await service.verifyOtp({challengeId: second, code: '246810'});
+            assert.ok(result.verificationToken);
+        });
+
+        test('the review number is not throttled, but every other number still is', async () => {
+            const repository = makeRepository();
+            repository.state.quotaAllowed = false;
+            repository.state.quotaReason = 'Please wait before asking for another code';
+            const {service} = build({repository, reviewAccount: {phoneNumber: PHONE, code: '246810'}});
+
+            const result = await service.requestOtp({phoneNumber: PHONE});
+            assert.ok(result.challengeId);
+
+            await assert.rejects(
+                service.requestOtp({phoneNumber: '+255754000111'}),
+                (error) => error.code === 'RATE_LIMITED'
+            );
+        });
+
+        test('with no review account configured, that number behaves like any other', async () => {
+            const {service, notificationPort} = build();
+
+            await service.requestOtp({phoneNumber: PHONE});
+
+            assert.equal(notificationPort.sent.length, 1);
+            assert.equal(notificationPort.sent[0].params.code, '123456');
+        });
     });
 
     describe('verifying a code', () => {
