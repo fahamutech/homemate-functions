@@ -2,10 +2,24 @@
   "name": "functions",
   "version": "1.0.0",
   "type": "module",
-  "scripts": {
-    "test": "echo \"no test\""
+  "engines": {
+    "node": ">=22"
   },
-  "dependencies": {},
-  "devDependencies": {},
+  "scripts": {
+    "dev": "bfast fs serve --port 3000",
+    "migrate": "node --env-file=.env migrations/run.mjs",
+    "migrate:test": "node --env-file=.env.test migrations/run.mjs",
+    "test:unit": "node scripts/run-specs.mjs src .unit.specs.mjs",
+    "test:integration": "node --env-file=.env.test scripts/run-specs.mjs src .integration.specs.mjs --serial",
+    "test:e2e": "node --env-file=.env.test scripts/run-specs.mjs specs .e2e.specs.mjs --serial",
+    "test": "npm run test:unit && npm run test:integration && npm run test:e2e"
+  },
+  "dependencies": {
+    "pg": "~8.16.3"
+  },
+  "devDependencies": {
+    "bfast-tools": "~2.0.0",
+    "bfast-function": "~3.0.0"
+  },
   "private": true
 }
