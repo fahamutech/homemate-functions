@@ -6,6 +6,8 @@ const created = new Date().toISOString();
 const HTTP_STATUS_BY_ERROR_CODE = {
     [AdminAccessErrorCodes.INVALID_CREDENTIALS]: 401,
     [AdminAccessErrorCodes.NOT_CONFIGURED]: 500,
+    [AdminAccessErrorCodes.ACCOUNT_INACTIVE]: 403,
+    [AdminAccessErrorCodes.KYC_REQUIRED]: 403,
 };
 
 export const adminLogin = {
@@ -39,6 +41,12 @@ export const adminMe = {
     path: '/auth/admin/me',
     description: 'Returns the authenticated admin for the current session token (protected by guards/auth.mjs)',
     onRequest: (request, response) => {
-        response.status(200).json({admin: {email: request.auth.email, role: request.auth.role}});
+        response.status(200).json({
+            admin: {
+                email: request.auth.email,
+                role: request.auth.role,
+                allowedRoutes: request.auth.allowedRoutes ?? null,
+            },
+        });
     },
 };

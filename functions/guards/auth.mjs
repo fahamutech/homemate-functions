@@ -1,21 +1,27 @@
 import {getSharedSessionTokens} from '../../src/shared/session-tokens.mjs';
+import {STAFF_ROLES} from '../../src/shared/roles.mjs';
+import {resourceKeysForPath} from '../../src/shared/admin-acl.mjs';
 
 const created = new Date().toISOString();
 
 /**
  * Builds a guard descriptor that requires a valid Bearer session token at
- * exactly `path`, optionally constrained to a specific `requiredRole`.
- * Both identity-access sessions ({userId, phoneNumber}) and admin-access
- * sessions ({role: 'admin', email}) are signed by the same shared
- * session-tokens.mjs, so a validly-signed token alone is NOT enough to
- * authorize an admin route — a customer/broker token would pass signature
- * verification too. `requiredRole` closes that gap.
+ * exactly `path`, optionally constrained to `requiredRole` (a role, or an
+ * array of roles any of which is accepted). Both identity-access sessions
+ * ({userId, phoneNumber}) and admin-access sessions ({role, email, ...})
+ * are signed by the same shared session-tokens.mjs, so a validly-signed
+ * token alone is NOT enough to authorize an admin route — a customer/broker
+ * token would pass signature verification too. `requiredRole` closes that
+ * gap; `enforceAcl` additionally checks a non-admin staff session's
+ * `allowedRoutes` against the request path (see shared/admin-acl.mjs).
  *
  * bfast-function mounts a guard's `onGuard` as Express middleware scoped to
  * its `path` prefix, so e.g. the '/auth/me' guard never runs for
  * '/auth/otp/request' or '/auth/admin/login'.
  */
-function createSessionGuard(path, description, {requiredRole} = {}) {
+function createSessionGuard(path, description, {requiredRole, enforceAcl = false} = {}) {
+    const allowedRoles = requiredRole == null ? null : [].concat(requiredRole);
+
     return {
         created,
         path,
@@ -34,9 +40,28 @@ function createSessionGuard(path, description, {requiredRole} = {}) {
                 return;
             }
 
-            if (requiredRole && payload.role !== requiredRole) {
-                response.status(403).json({error: 'FORBIDDEN', message: `This route requires a ${requiredRole} session`});
+            if (allowedRoles && !allowedRoles.includes(payload.role)) {
+                response
+                    .status(403)
+                    .json({error: 'FORBIDDEN', message: `This route requires one of these roles: ${allowedRoles.join(', ')}`});
                 return;
+            }
+
+            // The single admin role always has full access. A restricted
+            // staff role (moderator/manager/finance_auditor) is further
+            // scoped to whichever sidebar sections it was granted.
+            if (enforceAcl && payload.role !== 'admin') {
+                const requestPath = (request.originalUrl ?? request.url ?? '').split('?')[0];
+                const requiredKeys = resourceKeysForPath(requestPath);
+                const grantedKeys = Array.isArray(payload.allowedRoutes) ? payload.allowedRoutes : [];
+                const permitted = requiredKeys !== null
+                    && (requiredKeys.length === 0 || requiredKeys.some((key) => grantedKeys.includes(key)));
+                if (!permitted) {
+                    response
+                        .status(403)
+                        .json({error: 'FORBIDDEN', message: 'Your account does not have access to this section'});
+                    return;
+                }
             }
 
             request.auth = payload;
@@ -52,16 +77,18 @@ export const requireCustomerSession = createSessionGuard(
 
 export const requireAdminSession = createSessionGuard(
     '/auth/admin/me',
-    'Requires a valid Bearer admin session token issued by /auth/admin/login',
-    {requiredRole: 'admin'}
+    'Requires a valid Bearer staff session token issued by /auth/admin/login',
+    {requiredRole: STAFF_ROLES}
 );
 
 // One guard covers the whole admin API surface, so a new /admin/* route is
 // protected the moment it exists — there is no per-route step to forget.
+// Every backoffice role may pass the session check; resourceKeysForPath
+// then scopes non-admin roles to their granted sidebar sections.
 export const requireAdminForConsole = createSessionGuard(
     '/admin',
-    'Requires an admin session for every backoffice API route',
-    {requiredRole: 'admin'}
+    'Requires a staff session for every backoffice API route, ACL-scoped for non-admin roles',
+    {requiredRole: STAFF_ROLES, enforceAcl: true}
 );
 
 /**

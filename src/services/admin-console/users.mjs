@@ -1,11 +1,21 @@
 import {withActor, query, toPage, pageParams, nullIfBlank, updateById} from '../../shared/db.mjs';
 import {notFound, invalid} from '../../shared/errors.mjs';
+import {PLATFORM_ROLES, STAFF_ROLES} from '../../shared/roles.mjs';
+import {hashPassword, generateInitialPassword} from '../../shared/passwords.mjs';
 
-export const PLATFORM_ROLES = ['customer', 'landlord', 'agency', 'broker'];
-export const STAFF_ROLES = ['moderator', 'manager', 'finance_auditor', 'admin'];
+export {PLATFORM_ROLES, STAFF_ROLES};
 const ALL_ROLES = [...PLATFORM_ROLES, ...STAFF_ROLES];
 
-const UPDATABLE_FIELDS = ['full_name', 'email', 'phone_number', 'job_title', 'role', 'organization_id'];
+const UPDATABLE_FIELDS = [
+    'full_name', 'email', 'phone_number', 'job_title', 'role', 'organization_id', 'allowed_routes',
+];
+
+/** Backoffice route keys (navConfig.ts) an invited staff account may open; 'admin' ignores this. */
+function normalizeAllowedRoutes(value) {
+    if (!Array.isArray(value)) return null;
+    const keys = value.filter((key) => typeof key === 'string' && key.trim().length > 0);
+    return keys.length > 0 ? keys : [];
+}
 
 /** A boolean filter has three meanings: on, off, and "don't filter". */
 function triState(value) {
@@ -58,10 +68,21 @@ export function createUsersService({pool}) {
             throw invalid('Either phoneNumber or email is required');
         }
 
+        const isStaff = STAFF_ROLES.includes(role);
+        // Staff authenticate with a password (platform users use phone OTP),
+        // and it starts as a one-time secret only the creator ever sees in
+        // plaintext — see the `initial_password` field on the return value.
+        const initialPassword = isStaff ? generateInitialPassword() : null;
+        const passwordHash = initialPassword ? await hashPassword(initialPassword) : null;
+        // 'admin' always has full access and never needs a route list.
+        const allowedRoutes = isStaff && role !== 'admin' ? normalizeAllowedRoutes(input.allowedRoutes) : null;
+
         return withActor(pool, actor, async (client) => {
             const {rows} = await client.query(
-                `insert into users (phone_number, email, full_name, role, organization_id, job_title, status)
-                 values ($1, $2, $3, $4, $5, $6, $7)
+                `insert into users
+                    (phone_number, email, full_name, role, organization_id, job_title, status,
+                     password_hash, allowed_routes)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
                  returning id`,
                 [
                     // phone is NOT NULL on the table; staff invited by email get a placeholder
@@ -71,11 +92,13 @@ export function createUsersService({pool}) {
                     role,
                     nullIfBlank(input.organizationId),
                     nullIfBlank(input.jobTitle),
-                    nullIfBlank(input.status) ?? (STAFF_ROLES.includes(role) ? 'pending' : 'active'),
+                    nullIfBlank(input.status) ?? (isStaff ? 'pending' : 'active'),
+                    passwordHash,
+                    allowedRoutes ? JSON.stringify(allowedRoutes) : null,
                 ]
             );
             const {rows: created} = await client.query('select * from v_users where id = $1', [rows[0].id]);
-            return created[0];
+            return initialPassword ? {...created[0], initial_password: initialPassword} : created[0];
         });
     }
 
@@ -94,6 +117,10 @@ export function createUsersService({pool}) {
                     role: nullIfBlank(patch.role) ?? undefined,
                     organization_id:
                         patch.organizationId === undefined ? undefined : nullIfBlank(patch.organizationId),
+                    allowed_routes:
+                        patch.allowedRoutes === undefined
+                            ? undefined
+                            : JSON.stringify(normalizeAllowedRoutes(patch.allowedRoutes) ?? []),
                 },
             });
             if (!updated) throw notFound('User');

@@ -6,6 +6,11 @@
 -- function lives here rather than in application code — see 003_triggers.sql
 -- and 004_views_functions.sql. The Node layer is deliberately a thin caller.
 
+-- pg_trgm backs the gin_trgm_ops indexes below, used for fuzzy name/title search.
+create extension if not exists pg_trgm;
+-- postgis backs the geography column/functions used for property location search.
+create extension if not exists postgis;
+
 -- ---------------------------------------------------------------------------
 -- Enumerated domains
 -- ---------------------------------------------------------------------------
