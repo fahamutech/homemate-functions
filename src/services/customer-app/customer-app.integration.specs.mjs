@@ -326,6 +326,42 @@ describe('customer app (Postgres integration)', () => {
             );
         });
 
+        test('an omitted duration means the usual half hour, not zero minutes', async () => {
+            // The app sends `durationMinutes: null` for "I did not choose one".
+            // Coercing that with Number() gave 0, which the table's
+            // duration_sane check rejected — every booking from the phone came
+            // back as a constraint name.
+            const viewing = await app.requestViewing(customer, {
+                propertyId,
+                scheduledFor: soon(),
+                durationMinutes: null,
+            });
+            assert.equal(viewing.duration_minutes, 30);
+        });
+
+        test('a duration outside what the table allows is refused in words', async () => {
+            for (const durationMinutes of [0, 5, 600]) {
+                await assert.rejects(
+                    app.requestViewing(customer, {propertyId, scheduledFor: soon(), durationMinutes}),
+                    (error) => {
+                        assert.equal(error.code, ErrorCodes.VALIDATION_FAILED);
+                        // A sentence a customer could act on, not a constraint name.
+                        assert.doesNotMatch(error.message, /constraint/i);
+                        return true;
+                    }
+                );
+            }
+        });
+
+        test('a duration the table allows is kept', async () => {
+            const viewing = await app.requestViewing(customer, {
+                propertyId,
+                scheduledFor: soon(),
+                durationMinutes: 45,
+            });
+            assert.equal(viewing.duration_minutes, 45);
+        });
+
         test('cancelling needs a reason and records it', async () => {
             const viewing = await app.requestViewing(customer, {propertyId, scheduledFor: soon()});
 
@@ -520,6 +556,48 @@ describe('customer app (Postgres integration)', () => {
     });
 
     // --- preferences, notifications, summary ---------------------------------
+
+    // --- reference data --------------------------------------------------------
+
+    describe('reference data', () => {
+        test('gives the app every picker list in one call', async () => {
+            const reference = await app.referenceData();
+
+            for (const key of ['propertyTypes', 'amenities', 'regions', 'districts', 'wards']) {
+                assert.ok(Array.isArray(reference[key]), `${key} should be a list`);
+                assert.ok(reference[key].length > 0, `${key} should not be empty`);
+            }
+            assert.ok(reference.propertyTypes.some((type) => type.code === 'apartment'));
+        });
+
+        test('places districts under their region, so the picker can cascade', async () => {
+            const reference = await app.referenceData();
+            const dar = reference.regions.find((region) => region.code === 'dar_es_salaam');
+            const kinondoni = reference.districts.find((district) => district.code === 'kinondoni');
+
+            assert.ok(dar);
+            assert.equal(kinondoni.parentId, dar.id);
+        });
+
+        test('leaves out anything archived, so a filter cannot offer a dead option', async () => {
+            const {rows} = await pool.query(
+                `select id, code from dictionary_items where category = 'amenity' limit 1`
+            );
+            const archived = rows[0];
+            await pool.query('update dictionary_items set is_active = false where id = $1', [
+                archived.id,
+            ]);
+
+            try {
+                const reference = await app.referenceData();
+                assert.ok(!reference.amenities.some((amenity) => amenity.id === archived.id));
+            } finally {
+                await pool.query('update dictionary_items set is_active = true where id = $1', [
+                    archived.id,
+                ]);
+            }
+        });
+    });
 
     describe('profile and activity', () => {
         test('saves and reads back search preferences', async () => {

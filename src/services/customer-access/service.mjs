@@ -28,6 +28,36 @@ const OBVIOUS_PINS = new Set([
     '1234', '4321', '2580', '0123', '123456', '654321', '111111', '000000',
 ]);
 
+const GENDERS = new Set(['female', 'male', 'other', 'undisclosed']);
+
+/** Mirrors users_dob_sane in 009: a birthday cannot be today or later. */
+function readDateOfBirth(value) {
+    if (value === undefined || value === null || `${value}`.trim() === '') return null;
+    const text = `${value}`.trim();
+    const parsed = new Date(`${text}T00:00:00Z`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(parsed.getTime())) {
+        throw new DomainError(ErrorCodes.VALIDATION_FAILED, 'Give the date of birth as YYYY-MM-DD', 400);
+    }
+    if (parsed >= new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z')) {
+        throw new DomainError(ErrorCodes.VALIDATION_FAILED, 'That date of birth is in the future', 400);
+    }
+    return text;
+}
+
+/** Mirrors users_gender_known in 009. */
+function readGender(value) {
+    if (value === undefined || value === null || `${value}`.trim() === '') return null;
+    const text = `${value}`.trim().toLowerCase();
+    if (!GENDERS.has(text)) {
+        throw new DomainError(
+            ErrorCodes.VALIDATION_FAILED,
+            `gender must be one of: ${[...GENDERS].join(', ')}`,
+            400
+        );
+    }
+    return text;
+}
+
 function defaultGenerateCode() {
     return String(randomInt(0, 1_000_000)).padStart(6, '0');
 }
@@ -313,8 +343,17 @@ export function createCustomerAccessService({
         return repository.publicUser(user);
     }
 
-    /** The onboarding profile step (CUS-008a): name, email, language. */
-    async function completeProfile({userId, fullName, email, preferredLanguage}) {
+    /**
+     * The onboarding profile step (CUS-008a), and the same screen reached
+     * later from Profile → Edit your details.
+     *
+     * Date of birth and gender are optional: they belong to the identity
+     * record the KYC review reads, and a customer who only wants to browse
+     * should not be stopped at a date picker. What is *given* still has to be
+     * sane, because `users_dob_sane` and `users_gender_known` in 009 will
+     * otherwise refuse the row with a constraint name nobody can act on.
+     */
+    async function completeProfile({userId, fullName, email, preferredLanguage, dateOfBirth, gender}) {
         if (!`${fullName ?? ''}`.trim()) {
             throw new DomainError(ErrorCodes.VALIDATION_FAILED, 'Please enter your name', 400);
         }
@@ -322,6 +361,8 @@ export function createCustomerAccessService({
             fullName: `${fullName}`.trim(),
             email: `${email ?? ''}`.trim() || null,
             preferredLanguage: preferredLanguage === 'sw' ? 'sw' : 'en',
+            dateOfBirth: readDateOfBirth(dateOfBirth),
+            gender: readGender(gender),
         });
         return repository.publicUser(user);
     }

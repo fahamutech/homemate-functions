@@ -108,8 +108,14 @@ export const customerMe = route({
 export const customerCompleteProfile = route({
     method: 'post',
     path: '/app/me/profile',
-    description: 'Finish onboarding: name, email and preferred language',
-    requestSample: {fullName: 'Neema Kileo', email: 'neema@example.com', preferredLanguage: 'sw'},
+    description: 'Finish onboarding, or edit it later: name, email, language, date of birth and gender',
+    requestSample: {
+        fullName: 'Neema Kileo',
+        email: 'neema@example.com',
+        preferredLanguage: 'sw',
+        dateOfBirth: '1994-04-12',
+        gender: 'female',
+    },
     handler: (request) =>
         customerAccess.completeProfile({userId: request.auth.userId, ...(request.body ?? {})}),
 });

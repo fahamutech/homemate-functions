@@ -24,6 +24,9 @@ export function publicUser(row) {
         hasPin: Boolean(row.pin_hash),
         onboardingComplete: Boolean(row.onboarding_completed_at),
         kycStatus: row.kyc_status,
+        // Dates come back from pg as a Date; the app wants the plain day.
+        dateOfBirth: row.date_of_birth ? new Date(row.date_of_birth).toISOString().slice(0, 10) : null,
+        gender: row.gender ?? null,
         profilePhoto: Boolean(row.profile_photo_url),
         createdAt: row.created_at,
     };
@@ -202,17 +205,26 @@ export function createCustomerAccessRepository({pool}) {
         return rows[0];
     }
 
-    async function completeOnboarding(userId, {fullName, email, preferredLanguage}) {
+    async function completeOnboarding(
+        userId,
+        {fullName, email, preferredLanguage, dateOfBirth = null, gender = null}
+    ) {
         return withActor(pool, userId, async (client) => {
             const {rows} = await client.query(
+                // `coalesce` on the optional columns so re-running the screen
+                // with a field left blank does not erase what was already
+                // recorded — an edit of the name is not a withdrawal of the
+                // date of birth.
                 `update users
                     set full_name = $2,
                         email = coalesce($3, email),
                         preferred_language = $4,
+                        date_of_birth = coalesce($5::date, date_of_birth),
+                        gender = coalesce($6, gender),
                         onboarding_completed_at = coalesce(onboarding_completed_at, now())
                   where id = $1
                   returning *`,
-                [userId, fullName, email, preferredLanguage]
+                [userId, fullName, email, preferredLanguage, dateOfBirth, gender]
             );
             return rows[0];
         });

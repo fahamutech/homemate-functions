@@ -1,4 +1,10 @@
-import {customerApp, customerGeocoding, storagePort} from '../../src/services/customer-app/container.mjs';
+import {
+    customerApp,
+    customerJourney,
+    customerIdentity,
+    customerGeocoding,
+    storagePort,
+} from '../../src/services/customer-app/container.mjs';
 import {route} from '../../src/shared/http.mjs';
 import {invalid} from '../../src/shared/errors.mjs';
 import {getPool} from '../../src/db/pool.mjs';
@@ -87,6 +93,15 @@ export const appReverseGeocode = route({
         }
         return {result: await customerGeocoding.reverse(latitude, longitude)};
     },
+});
+
+// --- reference data -----------------------------------------------------------
+
+export const appReferenceData = route({
+    method: 'get',
+    path: '/app/reference',
+    description: 'Property types, amenities and the region/district/ward tree, for the app’s pickers',
+    handler: () => customerApp.referenceData(),
 });
 
 // --- saved -------------------------------------------------------------------
@@ -285,4 +300,234 @@ export const appActivitySummary = route({
     path: '/app/summary',
     description: 'Counts for the home screen and profile badges',
     handler: (request) => customerApp.activitySummary(me(request)),
+});
+
+// --- identity (KYC), from the customer's own phone ---------------------------
+
+/**
+ * Files arrive as base64 in the JSON body, the same way the backoffice takes
+ * them: the app has no storage credentials and never will, so every byte goes
+ * through here.
+ */
+function decodeUpload(payload, field) {
+    if (!payload) return null;
+    const base64 = payload.base64 ?? payload.data;
+    if (!base64) throw invalid(`${field}.base64 is required`);
+    return {
+        name: payload.name,
+        contentType: payload.contentType ?? 'application/octet-stream',
+        body: Buffer.from(String(base64).replace(/^data:[^,]+,/, ''), 'base64'),
+    };
+}
+
+export const appGetIdentity = route({
+    method: 'get',
+    path: '/app/me/kyc',
+    description: 'The customer’s own verification status and the documents behind it',
+    handler: (request) => customerIdentity.getIdentity(me(request)),
+});
+
+export const appAddIdentityDocument = route({
+    method: 'post',
+    path: '/app/me/kyc/documents',
+    description: 'Upload an identity document or a selfie; the first one starts the review',
+    requestSample: {documentType: 'national_id', file: {base64: '…', contentType: 'image/jpeg'}},
+    handler: async (request) => ({
+        status: 201,
+        body: await customerIdentity.addDocument(me(request), {
+            documentType: request.body?.documentType,
+            documentNumber: request.body?.documentNumber,
+            file: decodeUpload(request.body?.file, 'file'),
+            thumbnail: decodeUpload(request.body?.thumbnail, 'thumbnail'),
+        }),
+    }),
+});
+
+export const appReadIdentityDocument = route({
+    method: 'get',
+    path: '/app/me/kyc/documents/:documentId/raw',
+    description: 'Stream back one of the customer’s own documents',
+    handler: async (request, response) => {
+        const {body, contentType} = await customerIdentity.documentContent(
+            me(request),
+            request.params.documentId,
+            {thumbnail: request.query?.thumbnail === '1' || request.query?.thumbnail === 'true'}
+        );
+        response.setHeader('content-type', contentType);
+        response.setHeader('cache-control', 'private, no-store');
+        response.status(200).send(body);
+    },
+});
+
+export const appSetProfilePhoto = route({
+    method: 'put',
+    path: '/app/me/photo',
+    description: 'Set the profile photo shown on the account and matched against the ID',
+    handler: (request) =>
+        customerIdentity.setPhoto(me(request), {
+            file: decodeUpload(request.body?.image ?? request.body?.file, 'image'),
+            thumbnail: decodeUpload(request.body?.thumbnail, 'thumbnail'),
+        }),
+});
+
+export const appReadProfilePhoto = route({
+    method: 'get',
+    path: '/app/me/photo/raw',
+    description: 'Stream the customer’s own profile photo',
+    handler: async (request, response) => {
+        const {body, contentType} = await customerIdentity.photoContent(me(request), {
+            thumbnail: request.query?.thumbnail === '1' || request.query?.thumbnail === 'true',
+        });
+        response.setHeader('content-type', contentType);
+        response.setHeader('cache-control', 'private, no-store');
+        response.status(200).send(body);
+    },
+});
+
+// --- the journey: holds, checkout, tenancies ---------------------------------
+
+/**
+ * CUS-013a in one call. The Favourites screen is four sections — active rents,
+ * saved homes, recent enquiries, upcoming viewings — and assembling it out of
+ * four requests on a Tanzanian mobile connection is four chances to show a
+ * spinner instead of a screen.
+ */
+export const appSavedOverview = route({
+    method: 'get',
+    path: '/app/saved/overview',
+    description: 'Everything the Favourites screen shows, in one round trip',
+    handler: (request) => customerJourney.savedOverview(me(request), request.query ?? {}),
+});
+
+/**
+ * "Can I pay for this yet, and how did I get here?" Every Pay button in the
+ * app asks this first, so an accepted enquiry, a finished viewing and an
+ * outright purchase cannot disagree about who is allowed.
+ */
+export const appCheckoutEligibility = route({
+    method: 'get',
+    path: '/app/properties/:id/checkout',
+    description: 'Whether this customer may pay for this property, and by which route',
+    handler: (request) => customerJourney.checkoutEligibility(me(request), request.params.id),
+});
+
+export const appPropertyJourney = route({
+    method: 'get',
+    path: '/app/properties/:id/journey',
+    description: 'The customer’s own timeline for one property (CUS-013b)',
+    handler: (request) => customerJourney.propertyJourney(me(request), request.params.id),
+});
+
+export const appPropertyPaymentMethods = route({
+    method: 'get',
+    path: '/app/properties/:id/payment-methods',
+    description: 'The ways this listing accepts money, for the checkout picker',
+    handler: (request) => customerJourney.paymentMethodsFor(request.params.id),
+});
+
+/**
+ * Take the property for ten minutes. This is the bus-seat rule: while one
+ * customer is inside the payment flow nobody else may start, so two people
+ * cannot both pay for the same home and one of them be refunded by hand.
+ */
+export const appHoldProperty = route({
+    method: 'post',
+    path: '/app/properties/:id/hold',
+    description: 'Reserve this property for ten minutes while the customer pays',
+    handler: async (request) => ({
+        status: 201,
+        body: await customerJourney.hold(me(request), request.params.id, request.body ?? {}),
+    }),
+});
+
+export const appMyHolds = route({
+    method: 'get',
+    path: '/app/holds',
+    description: 'Whatever this customer is currently holding, with the time left on it',
+    handler: (request) => customerJourney.myHolds(me(request)),
+});
+
+export const appReleaseHold = route({
+    method: 'delete',
+    path: '/app/holds/:id',
+    description: 'Give the property back early rather than making the next person wait',
+    handler: (request) =>
+        customerJourney.releaseHold(me(request), request.params.id, request.query?.reason),
+});
+
+/**
+ * Turn an intention into something payable: a booking, a payment, and a hold,
+ * all in one transaction. Works from an accepted enquiry, from a completed
+ * viewing, or from nothing at all.
+ */
+export const appStartCheckout = route({
+    method: 'post',
+    path: '/app/properties/:id/checkout',
+    description: 'Start paying for this property, whichever way the customer got here',
+    requestSample: {leaseMonths: 12, moveInDate: '2026-10-01'},
+    handler: async (request) => ({
+        status: 201,
+        body: await customerJourney.startCheckout(me(request), request.params.id, request.body ?? {}),
+    }),
+});
+
+export const appCheckoutSummary = route({
+    method: 'get',
+    path: '/app/bookings/:id/summary',
+    description: 'CUS-011 — what is being paid and what each part of it is for',
+    handler: (request) => customerJourney.checkoutSummary(me(request), request.params.id),
+});
+
+/**
+ * CUS-014. The customer has chosen a method and pressed pay.
+ *
+ * This opens a charge with the provider and hands back the instruction — the
+ * till number, the reference, or "check your phone". It cannot settle
+ * anything: BR-005 means only a provider callback or a finance officer can
+ * make a payment successful.
+ */
+export const appPayNow = route({
+    method: 'post',
+    path: '/app/payments/:id/pay',
+    description: 'Open a charge with the chosen provider and return how to complete it',
+    requestSample: {paymentMethodId: '…', payerPhone: '+255712345678'},
+    handler: (request) => customerJourney.payNow(me(request), request.params.id, request.body ?? {}),
+});
+
+/** CUS-007e. Ask a landlord who has gone quiet to look again. */
+export const appNudgeInquiry = route({
+    method: 'post',
+    path: '/app/inquiries/:id/nudge',
+    description: 'Send the landlord a reminder about an enquiry still waiting',
+    handler: (request) => customerJourney.nudgeInquiry(me(request), request.params.id),
+});
+
+export const appInquiryJourney = route({
+    method: 'get',
+    path: '/app/inquiries/:id/journey',
+    description: 'The status timeline behind one enquiry (CUS-007d/e)',
+    handler: (request) => customerJourney.inquiryJourney(me(request), request.params.id),
+});
+
+// --- tenancies ---------------------------------------------------------------
+
+export const appListRentals = route({
+    method: 'get',
+    path: '/app/rentals',
+    description: 'CUS-012a — every lease the customer is currently living under',
+    handler: (request) => customerJourney.listRentals(me(request), request.query ?? {}),
+});
+
+export const appGetRental = route({
+    method: 'get',
+    path: '/app/rentals/:id',
+    description: 'CUS-012b — one tenancy: money, paperwork, payment history and extras',
+    handler: (request) => customerJourney.getRental(me(request), request.params.id),
+});
+
+export const appGetLease = route({
+    method: 'get',
+    path: '/app/rentals/:id/lease',
+    description: 'CUS-012c — the lease agreement behind a tenancy',
+    handler: (request) => customerJourney.getLease(me(request), request.params.id),
 });

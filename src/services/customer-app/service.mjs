@@ -17,6 +17,10 @@ import {notFound, invalid, DomainError, ErrorCodes} from '../../shared/errors.mj
 
 const CONTACT_PREFERENCES = ['phone', 'sms', 'whatsapp', 'email', 'in_app'];
 
+// Mirrors property_viewings_duration_sane in 013_customer_domain.sql.
+const VIEWING_MIN_MINUTES = 15;
+const VIEWING_MAX_MINUTES = 240;
+
 export function createCustomerAppService({pool}) {
     // --- discovery -----------------------------------------------------------
 
@@ -49,8 +53,13 @@ export function createCustomerAppService({pool}) {
                 p_furnishing => $13::furnishing_status,
                 p_payment_frequency => $14::rent_payment_frequency,
                 p_amenity_ids => $15::uuid[],
-                p_limit => $16,
-                p_offset => $17
+                p_min_bathrooms => $16::smallint,
+                p_min_size_sqm => $17,
+                p_max_size_sqm => $18,
+                p_available_by => $19::date,
+                p_verified_only => $20,
+                p_limit => $21,
+                p_offset => $22
             )`,
             [
                 nullIfBlank(filters.query),
@@ -68,6 +77,11 @@ export function createCustomerAppService({pool}) {
                 nullIfBlank(filters.furnishing),
                 nullIfBlank(filters.paymentFrequency),
                 filters.amenityIds?.length ? filters.amenityIds : null,
+                numberOrNull(filters.bathrooms),
+                numberOrNull(filters.minSizeSqm),
+                numberOrNull(filters.maxSizeSqm),
+                nullIfBlank(filters.availableBy),
+                booleanOrNull(filters.verifiedOnly) ?? false,
                 limit,
                 offset,
             ]
@@ -97,6 +111,41 @@ export function createCustomerAppService({pool}) {
         if (!detail?.property) throw notFound('Property');
         if (detail.property.status !== 'approved') throw notFound('Property');
         return detail;
+    }
+
+    // --- reference data ------------------------------------------------------
+
+    /**
+     * The lists every picker in the app is built from — property types,
+     * amenities, and the region/district/ward tree — in one call.
+     *
+     * One call rather than five: the filter sheet, the search overlay and the
+     * onboarding preferences step all need the same four lists at once, and a
+     * screen that renders before its chips arrive is a screen that flickers.
+     * Archived entries are left out, because a filter must never offer
+     * something no listing can match.
+     */
+    async function referenceData() {
+        const {rows} = await query(
+            pool,
+            `select id, category, code, name, parent_id, sort_order
+               from dictionary_items
+              where is_active and category in ('property_type', 'amenity', 'region', 'district', 'ward')
+              order by category, sort_order, name`
+        );
+
+        const by = (category) =>
+            rows
+                .filter((row) => row.category === category)
+                .map(({id, code, name, parent_id}) => ({id, code, name, parentId: parent_id}));
+
+        return {
+            propertyTypes: by('property_type'),
+            amenities: by('amenity'),
+            regions: by('region'),
+            districts: by('district'),
+            wards: by('ward'),
+        };
     }
 
     // --- saved properties ----------------------------------------------------
@@ -254,11 +303,31 @@ export function createCustomerAppService({pool}) {
         return rows[0];
     }
 
+    /**
+     * A viewing lasts between a quarter of an hour and four hours (the table's
+     * own check). An omitted value is not a zero-minute viewing — it means
+     * "use the usual half hour", so it has to stay null all the way to the
+     * insert's `coalesce`, and anything else is rejected here with a sentence
+     * rather than by the database with a constraint name.
+     */
+    function viewingDuration(value) {
+        if (value === undefined || value === null || value === '') return null;
+        const minutes = Number(value);
+        if (!Number.isInteger(minutes)) throw invalid('Duration must be a whole number of minutes');
+        if (minutes < VIEWING_MIN_MINUTES || minutes > VIEWING_MAX_MINUTES) {
+            throw invalid(
+                `A viewing must last between ${VIEWING_MIN_MINUTES} minutes and ${VIEWING_MAX_MINUTES / 60} hours`
+            );
+        }
+        return minutes;
+    }
+
     async function requestViewing(customerId, input) {
         const propertyId = nullIfBlank(input.propertyId);
         const scheduledFor = nullIfBlank(input.scheduledFor);
         if (!propertyId) throw invalid('propertyId is required');
         if (!scheduledFor) throw invalid('Please choose a date and time');
+        const durationMinutes = viewingDuration(input.durationMinutes);
 
         return withActor(pool, customerId, async (client) => {
             const {rows: property} = await client.query(
@@ -284,9 +353,7 @@ export function createCustomerAppService({pool}) {
                     customerId,
                     nullIfBlank(input.inquiryId),
                     scheduledFor,
-                    input.durationMinutes === undefined || input.durationMinutes === ''
-                        ? null
-                        : Number(input.durationMinutes),
+                    durationMinutes,
                     property[0].host_id,
                     nullIfBlank(input.meetingPoint),
                     nullIfBlank(input.note),
@@ -619,6 +686,7 @@ export function createCustomerAppService({pool}) {
         listPayments,
         getPayment,
         declarePaid,
+        referenceData,
         getPreferences,
         savePreferences,
         listNotifications,
