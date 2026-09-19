@@ -557,6 +557,25 @@ describe('customer journey (Postgres integration)', () => {
             assert.equal(overview.recentInquiries[0].display_status, 'awaiting_payment');
         });
 
+        test('stops asking for payment once the booking it produced is paid', async () => {
+            // The bug this covers: nothing ever ended 'awaiting_payment', so a
+            // customer with an active rent in the section above was still being
+            // told by this row that they owed for it.
+            const inquiry = await app.createInquiry(customer, {propertyId, message: 'Interested'});
+            await pool.query("update property_inquiries set status = 'accepted' where id = $1", [
+                inquiry.id,
+            ]);
+
+            const checkout = await journey.startCheckout(customer, propertyId, {leaseMonths: 12});
+            await journey.payNow(customer, checkout.paymentId, {
+                paymentMethodId: await activeMethodId(),
+            });
+            await money.reconcilePayment(checkout.paymentId, {note: 'Paid'}, 'finance@homemate.co.tz');
+
+            const overview = await journey.savedOverview(customer);
+            assert.equal(overview.recentInquiries[0].display_status, 'booked');
+        });
+
         test('sees only its own customer’s records', async () => {
             await app.saveProperty(other, propertyId);
 
@@ -573,7 +592,12 @@ describe('customer journey (Postgres integration)', () => {
          * does. The payment is settled through the finance service rather than
          * with an UPDATE, because the database refuses to let anything else
          * mark a payment successful — which is BR-005 working, not an obstacle
-         * to route around.
+         * to route around. Settling is also what confirms the booking, so
+         * there is no status to set by hand.
+         *
+         * The lease is then backdated, because these tests are about a tenancy
+         * that is already running: "rent is next due in a fortnight" and "your
+         * notice window opens" need a lease with some of it behind them.
          */
         async function makeTenancy() {
             const checkout = await journey.startCheckout(customer, propertyId, {leaseMonths: 12});
@@ -587,14 +611,67 @@ describe('customer journey (Postgres integration)', () => {
             );
             await pool.query(
                 `update bookings
-                    set status = 'confirmed',
-                        lease_start_date = current_date - interval '2 months',
+                    set lease_start_date = current_date - interval '2 months',
                         lease_end_date = current_date + interval '10 months'
                   where id = $1`,
                 [checkout.bookingId]
             );
             return checkout.bookingId;
         }
+
+        test('settling the payment is what confirms the booking — no second manual step', async () => {
+            // The bug this covers: verifying the money left the booking on
+            // `awaiting_payment`, so a customer who had paid still saw
+            // "pending" in Activity and got no Active Rent in Favourites until
+            // an operator moved the booking by hand.
+            const checkout = await journey.startCheckout(customer, propertyId, {leaseMonths: 12});
+            await journey.payNow(customer, checkout.paymentId, {
+                paymentMethodId: await activeMethodId(),
+            });
+
+            const {rows: before} = await pool.query('select status from bookings where id = $1', [
+                checkout.bookingId,
+            ]);
+            assert.equal(before[0].status, 'awaiting_payment', 'not a tenancy until the money is in');
+
+            await money.reconcilePayment(checkout.paymentId, {note: 'Seen on the statement'}, 'finance@homemate.co.tz');
+
+            const {rows: after} = await pool.query(
+                'select status, confirmed_at, lease_start_date, lease_end_date from bookings where id = $1',
+                [checkout.bookingId]
+            );
+            assert.equal(after[0].status, 'confirmed');
+            assert.ok(after[0].confirmed_at, 'the confirmation is stamped');
+            assert.ok(after[0].lease_start_date, 'a confirmed booking has a lease that starts');
+            assert.ok(after[0].lease_end_date, 'and one that ends, so rent has a due date');
+
+            // And the two screens the customer actually looks at.
+            const overview = await journey.savedOverview(customer);
+            assert.equal(overview.activeRentalCount, 1, 'Favourites shows it as an active rent');
+
+            const {rows: holds} = await pool.query(
+                'select released_at from property_holds where booking_id = $1',
+                [checkout.bookingId]
+            );
+            assert.ok(holds[0].released_at, 'the checkout hold has done its job and is released');
+        });
+
+        test('a part payment is progress, not a tenancy', async () => {
+            const checkout = await journey.startCheckout(customer, propertyId, {leaseMonths: 12});
+            await journey.payNow(customer, checkout.paymentId, {
+                paymentMethodId: await activeMethodId(),
+            });
+            // Half of what was agreed lands.
+            await pool.query('update payments set amount = amount / 2 where id = $1', [
+                checkout.paymentId,
+            ]);
+            await money.reconcilePayment(checkout.paymentId, {note: 'Part'}, 'finance@homemate.co.tz');
+
+            const {rows} = await pool.query('select status from bookings where id = $1', [
+                checkout.bookingId,
+            ]);
+            assert.equal(rows[0].status, 'awaiting_payment');
+        });
 
         test('lists a confirmed booking as a tenancy, with the next rent date worked out', async () => {
             const bookingId = await makeTenancy();
