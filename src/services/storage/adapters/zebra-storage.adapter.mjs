@@ -18,25 +18,26 @@ export function createZebraStorageAdapter({baseUrl, username, password, fetchImp
 
     const root = baseUrl.replace(/\/+$/, '');
     const withRoot = (path) => `${root}/${path.replace(/^\/+/, '')}`;
-    let cachedToken = null;
-    let tokenExpiresAt = 0;
+    // let cachedToken = null;
+    // let tokenExpiresAt = 0;
 
     async function accessToken() {
+        return 'na';
         // refresh a minute before expiry so a long upload can't straddle it
-        if (cachedToken && now() < tokenExpiresAt - 60_000) return cachedToken;
-
-        const response = await fetchImpl(`${root}/auth/token`, {
-            method: 'POST',
-            headers: {'content-type': 'application/json'},
-            body: JSON.stringify({username, password}),
-        });
-        if (!response.ok) {
-            throw new StorageError('AUTH_FAILED', `Storage rejected the service credentials (${response.status})`);
-        }
-        const payload = await response.json();
-        cachedToken = payload.accessToken;
-        tokenExpiresAt = now() + Number(payload.expiresIn ?? 3600) * 1000;
-        return cachedToken;
+        // if (cachedToken && now() < tokenExpiresAt - 60_000) return cachedToken;
+        //
+        // const response = await fetchImpl(`${root}/auth/token`, {
+        //     method: 'POST',
+        //     headers: {'content-type': 'application/json'},
+        //     body: JSON.stringify({username, password}),
+        // });
+        // if (!response.ok) {
+        //     throw new StorageError('AUTH_FAILED', `Storage rejected the service credentials (${response.status})`);
+        // }
+        // const payload = await response.json();
+        // cachedToken = payload.accessToken;
+        // tokenExpiresAt = now() + Number(payload.expiresIn ?? 3600) * 1000;
+        // return cachedToken;
     }
 
     return {
