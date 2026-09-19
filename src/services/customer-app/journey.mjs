@@ -1,5 +1,6 @@
 import {withActor, query, toPage, pageParams, nullIfBlank} from '../../shared/db.mjs';
 import {notFound, invalid, DomainError, ErrorCodes} from '../../shared/errors.mjs';
+import {resolveLeaseMonths} from './lease-terms.mjs';
 
 /**
  * The part of the customer's journey that runs from "the landlord said yes" to
@@ -245,10 +246,7 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
 
                 const depositMonths = Number(p.deposit_months ?? 0);
                 const advanceMonths = Number(p.advance_rent_months ?? 0);
-                const leaseMonths =
-                    input.leaseMonths === undefined || input.leaseMonths === ''
-                        ? Number(p.min_lease_months ?? 12)
-                        : Number(input.leaseMonths);
+                const leaseMonths = resolveLeaseMonths(input.leaseMonths, p.min_lease_months);
 
                 const deposit = round2(rent * depositMonths);
                 const advance = round2(rent * advanceMonths);

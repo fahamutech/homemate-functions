@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "bfast fs serve --port 3001",
+    "dev": "bfast fs  serve --static --port 3001",
     "migrate": "node --env-file=.env migrations/run.mjs",
     "migrate:test": "node --env-file=.env.test migrations/run.mjs",
     "test:unit": "node scripts/run-specs.mjs src .unit.specs.mjs",

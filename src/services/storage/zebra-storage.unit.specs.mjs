@@ -150,6 +150,63 @@ describe('Zebra storage adapter', () => {
         );
     });
 
+    test('joins a key that has no leading slash onto the base URL', async () => {
+        // The bug this covers: keys are stored exactly as the service returned
+        // them, and a key without a leading slash concatenated straight onto
+        // the base URL produced `http://storage.testdemo/...`, which is not a
+        // URL at all — every thumbnail read 500ed.
+        const fetchImpl = scriptedFetch([
+            tokenHandler,
+            {
+                match: 'demo/',
+                respond: async () => ({
+                    ok: true,
+                    status: 200,
+                    headers: new Map([['content-type', 'image/webp']]),
+                    arrayBuffer: async () => Buffer.from('bytes'),
+                }),
+            },
+        ]);
+        const adapter = createZebraStorageAdapter({
+            baseUrl: 'http://storage.test',
+            username: 'u',
+            password: 'p',
+            fetchImpl,
+        });
+
+        const file = await adapter.get('demo/e819f5ee/0.webp');
+
+        assert.equal(file.contentType, 'image/webp');
+        const read = fetchImpl.calls.find((c) => c.href.includes('demo/'));
+        assert.equal(read.href, 'http://storage.test/demo/e819f5ee/0.webp');
+    });
+
+    test('does not double the slash when the base URL and the key both have one', async () => {
+        const fetchImpl = scriptedFetch([
+            tokenHandler,
+            {
+                match: '/storage/',
+                respond: async () => ({
+                    ok: true,
+                    status: 200,
+                    headers: new Map([['content-type', 'image/webp']]),
+                    arrayBuffer: async () => Buffer.from('bytes'),
+                }),
+            },
+        ]);
+        const adapter = createZebraStorageAdapter({
+            baseUrl: 'http://storage.test/',
+            username: 'u',
+            password: 'p',
+            fetchImpl,
+        });
+
+        await adapter.get('/storage/bafy123/front.webp');
+
+        const read = fetchImpl.calls.find((c) => c.href.includes('/storage/'));
+        assert.equal(read.href, 'http://storage.test/storage/bafy123/front.webp');
+    });
+
     test('refuses to start without a base URL', () => {
         assert.throws(() => createZebraStorageAdapter({baseUrl: ''}), (error) => {
             assert.equal(error.code, 'NOT_CONFIGURED');

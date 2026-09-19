@@ -45,6 +45,7 @@ export const customerRequestOtp = route({
                 userAgent: request.headers['user-agent'],
             });
         } catch (error) {
+            console.log(error);
             rateLimited(error, response);
             throw error;
         }

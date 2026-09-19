@@ -184,6 +184,7 @@ export function createCustomerAccessService({
                 params: {code, purpose, reference: challenge.id},
             });
         } catch (error) {
+            console.error(error);
             await repository.logOtpRequest({
                 phoneNumber, ipAddress, purpose, outcome: 'failed', reason: error.message,
             });

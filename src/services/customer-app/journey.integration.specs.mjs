@@ -304,6 +304,21 @@ describe('customer journey (Postgres integration)', () => {
             assert.equal(rows[0].status, 'awaiting_payment');
         });
 
+        test('an unchosen term falls back to the property minimum rather than failing', async () => {
+            // The mobile client sends `leaseMonths: null` for a field nobody
+            // touched. That used to become 0 and violate bookings_lease_sane,
+            // so checkout answered 422 for a perfectly ordinary booking.
+            const checkout = await journey.startCheckout(customer, propertyId, {
+                leaseMonths: null,
+                moveInDate: null,
+            });
+
+            const {rows} = await pool.query('select lease_months from bookings where id = $1', [
+                checkout.bookingId,
+            ]);
+            assert.equal(rows[0].lease_months, 12, 'the property min_lease_months stands in');
+        });
+
         test('the hold it takes blocks a second customer from starting one', async () => {
             await journey.startCheckout(customer, propertyId);
 

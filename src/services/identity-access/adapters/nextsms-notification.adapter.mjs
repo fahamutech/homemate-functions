@@ -53,7 +53,12 @@ export function createNextSmsAdapter({
         throw new Error('SMS_USERNAME and SMS_PASSWORD are required for the nextsms provider');
     }
 
-    const authorization = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+    console.log(`${username}:${password}`)
+    const rawBase64 = Buffer.from(`${username}:${password}`).toString('base64');
+    // Regex to split into 76-character chunks joined by CRLF
+    const rfc2045Base64 = rawBase64.match(/.{1,76}/g).join('\r\n');
+    const authorization = `Basic ${rfc2045Base64}`;
+    console.log(authorization)
     const sendPath = testMode ? '/api/sms/v1/test/text/single' : '/api/sms/v1/text/single';
 
     async function call(path, {method = 'GET', body} = {}) {
