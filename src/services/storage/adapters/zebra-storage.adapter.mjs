@@ -17,6 +17,7 @@ export function createZebraStorageAdapter({baseUrl, username, password, fetchImp
     if (!baseUrl) throw new StorageError('NOT_CONFIGURED', 'STORAGE_BASE_URL is not set', 500);
 
     const root = baseUrl.replace(/\/+$/, '');
+    const withRoot = (path) => `${root}/${path.replace(/^\/+/, '')}`;
     let cachedToken = null;
     let tokenExpiresAt = 0;
 
@@ -63,7 +64,7 @@ export function createZebraStorageAdapter({baseUrl, username, password, fetchImp
             return {
                 // the service returns a root-relative path; that path *is* the key
                 key: url,
-                url: `${root}${url}`,
+                url: withRoot(url),
                 name,
                 contentType,
                 sizeBytes: body.length,
@@ -72,7 +73,7 @@ export function createZebraStorageAdapter({baseUrl, username, password, fetchImp
 
         async get(key) {
             const token = await accessToken();
-            const path = key.startsWith('http') ? key : `${root}${key}`;
+            const path = key.startsWith('http') ? key : withRoot(key);
             const response = await fetchImpl(path, {headers: {authorization: `Bearer ${token}`}});
             if (response.status === 404) {
                 throw new StorageError('NOT_FOUND', 'That file is not in storage', 404);
