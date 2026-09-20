@@ -19,7 +19,7 @@ const UPDATABLE_FIELDS = [
  */
 function termsColumns(input) {
     const bool = (value) => (value === undefined ? undefined : value === true || value === 'true');
-    const num = (value, field) => (value === undefined ? undefined : numberOrUndefined(value, field));
+    const num = (value, field) => (value === undefined ? undefined : smallintOrUndefined(value, field));
 
     return {
         furnishing: nullIfBlank(input.furnishing) ?? undefined,
@@ -47,6 +47,19 @@ function numberOrUndefined(value, field = 'value') {
     if (value === undefined || value === null || value === '') return undefined;
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) throw invalid(`${field} must be a number, got "${value}"`);
+    return parsed;
+}
+
+const SMALLINT_MIN = -32768;
+const SMALLINT_MAX = 32767;
+
+/** Same as numberOrUndefined, but rejects values that don't fit the smallint columns these fields map to. */
+function smallintOrUndefined(value, field = 'value') {
+    const parsed = numberOrUndefined(value, field);
+    if (parsed === undefined) return undefined;
+    if (parsed < SMALLINT_MIN || parsed > SMALLINT_MAX) {
+        throw invalid(`${field} must be between ${SMALLINT_MIN} and ${SMALLINT_MAX}, got ${parsed}`);
+    }
     return parsed;
 }
 
@@ -166,8 +179,8 @@ export function createPropertiesService({pool}) {
                     nullIfBlank(input.organizationId),
                     numberOrUndefined(input.price) ?? null,
                     nullIfBlank(input.currency),
-                    numberOrUndefined(input.bedrooms) ?? null,
-                    numberOrUndefined(input.bathrooms) ?? null,
+                    smallintOrUndefined(input.bedrooms, 'bedrooms') ?? null,
+                    smallintOrUndefined(input.bathrooms, 'bathrooms') ?? null,
                     numberOrUndefined(input.sizeSqm) ?? null,
                     nullIfBlank(input.addressLine),
                     nullIfBlank(input.regionId),
@@ -221,8 +234,8 @@ export function createPropertiesService({pool}) {
                         patch.organizationId === undefined ? undefined : nullIfBlank(patch.organizationId),
                     price: numberOrUndefined(patch.price),
                     currency: nullIfBlank(patch.currency) ?? undefined,
-                    bedrooms: numberOrUndefined(patch.bedrooms),
-                    bathrooms: numberOrUndefined(patch.bathrooms),
+                    bedrooms: smallintOrUndefined(patch.bedrooms, 'bedrooms'),
+                    bathrooms: smallintOrUndefined(patch.bathrooms, 'bathrooms'),
                     size_sqm: numberOrUndefined(patch.sizeSqm),
                     address_line: patch.addressLine === undefined ? undefined : nullIfBlank(patch.addressLine),
                     region_id: patch.regionId === undefined ? undefined : nullIfBlank(patch.regionId),
