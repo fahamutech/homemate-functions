@@ -1,6 +1,7 @@
 import {withActor, query, toPage, pageParams, nullIfBlank} from '../../shared/db.mjs';
 import {notFound, invalid, DomainError, ErrorCodes} from '../../shared/errors.mjs';
 import {resolveLeaseMonths} from './lease-terms.mjs';
+import {checkoutSplits, loadFeeSettings, loadListingParties, round2, tenantFee} from '../../shared/fees.mjs';
 
 /**
  * The part of the customer's journey that runs from "the landlord said yes" to
@@ -169,21 +170,19 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
     // --- starting a checkout -------------------------------------------------
 
     /**
-     * Turn "I want this place" into something payable, whichever way the
-     * customer got here.
+     * Turn "the landlord said yes" into something payable.
      *
-     * Three routes lead in and all of them land on the same booking + payment
-     * pair (item 4 of the brief):
-     *
-     *   - an **accepted enquiry** — the landlord has said yes;
-     *   - a **completed viewing** — they have seen it and the day is done;
-     *   - **directly** — they know the listing and do not want to ask first.
-     *
-     * An enquiry is therefore a courtesy, not a turnstile. What *is* enforced
-     * is that the property is approved, unlet, and not currently being paid
-     * for by somebody else — and the ten-minute hold is taken in the same
+     * There is one road in: an **accepted enquiry**. The journey is enquire →
+     * accepted → pay → verified, and `customer_checkout_eligibility` (024)
+     * refuses everything else. The property must also be unlet and not being
+     * paid for by somebody else — and the ten-minute hold is taken in the same
      * transaction as the booking, so the reservation and the exclusivity
      * cannot come apart.
+     *
+     * The first payment is rent, deposit and the tenant fee together. The fee
+     * is snapshotted onto the booking and the payment is split the moment it
+     * is created, so what finance later settles is exactly what the customer
+     * was shown.
      */
     async function startCheckout(customerId, propertyId, input = {}) {
         if (!nullIfBlank(propertyId)) throw invalid('propertyId is required');
@@ -196,7 +195,7 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
             throw invalid(
                 eligibility.route === 'blocked'
                     ? 'The landlord declined this application, so it cannot be paid for'
-                    : 'This property cannot be paid for yet'
+                    : 'Send an enquiry first — you can pay once the landlord accepts it'
             );
         }
         if (eligibility.heldByOther) {
@@ -250,24 +249,24 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
 
                 const deposit = round2(rent * depositMonths);
                 const advance = round2(rent * advanceMonths);
-                const totalDue = round2(deposit + (advance > 0 ? advance : rent));
+                const feeSettings = await loadFeeSettings(client);
+                const fee = tenantFee(rent, feeSettings);
+                const totalDue = round2(deposit + (advance > 0 ? advance : rent) + fee.amount);
 
                 const {rows: booking} = await client.query(
                     `insert into bookings
-                         (property_id, customer_id, inquiry_id, viewing_id, monthly_rent, currency,
+                         (property_id, customer_id, inquiry_id, monthly_rent, currency,
                           deposit_amount, advance_months, payment_frequency, lease_months,
-                          move_in_date, total_due, notes, expires_at)
-                     values ($1, $2, $3, $4, $5, $6, $7, $8, $9::rent_payment_frequency, $10,
-                             $11::date, $12, $13, now() + interval '48 hours')
+                          move_in_date, total_due, notes, expires_at,
+                          service_fee, service_fee_percentage, platform_fee_percentage)
+                     values ($1, $2, $3, $4, $5, $6, $7, $8::rent_payment_frequency, $9,
+                             $10::date, $11, $12, now() + interval '48 hours', $13, $14, $15)
                      returning id`,
                     [
                         propertyId,
                         customerId,
-                        // Attribution: whichever door they came through is
-                        // recorded on the booking, so finance and the landlord
-                        // can both see how this tenancy began.
+                        // The enquiry the landlord accepted — the only door in.
                         eligibility.inquiryId,
-                        eligibility.viewingId,
                         rent,
                         p.currency ?? 'TZS',
                         deposit,
@@ -277,6 +276,9 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
                         nullIfBlank(input.moveInDate),
                         totalDue,
                         nullIfBlank(input.notes),
+                        fee.amount,
+                        fee.percentage,
+                        fee.platformPercentage,
                     ]
                 );
                 bookingId = booking[0].id;
@@ -288,6 +290,27 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
                     [bookingId, propertyId, customerId, totalDue, p.currency ?? 'TZS', customerId]
                 );
                 paymentId = payment[0].id;
+
+                // Split now, not at settlement: the ledger posts whatever rows
+                // exist when the payment turns successful, and the fee's owners
+                // are known today.
+                const parties = await loadListingParties(client, propertyId);
+                if (!parties.landlordUserId) {
+                    throw invalid('This property has no landlord on file, so it cannot be paid for yet');
+                }
+                for (const split of checkoutSplits({
+                    amount: totalDue,
+                    fee: fee.amount,
+                    platformPercentage: fee.platformPercentage,
+                    agent: parties.agent,
+                    landlordUserId: parties.landlordUserId,
+                })) {
+                    await client.query(
+                        `insert into payment_splits (payment_id, beneficiary_type, beneficiary_user_id, amount, percentage)
+                         values ($1, $2::beneficiary_type, $3, $4, $5)`,
+                        [paymentId, split.beneficiaryType, split.beneficiaryUserId ?? null, split.amount, split.percentage ?? null]
+                    );
+                }
 
                 await client.query("update bookings set status = 'awaiting_payment' where id = $1", [
                     bookingId,
@@ -336,6 +359,12 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
         const deposit = Number(booking.deposit_amount);
         const advanceMonths = Number(booking.advance_months ?? 0);
         const firstPeriod = advanceMonths > 0 ? round2(rent * advanceMonths) : rent;
+        const fee = tenantFee(rent, {
+            tenantFeePercentage: Number(booking.service_fee_percentage ?? 0),
+            platformPercentage: Number(booking.platform_fee_percentage ?? 0),
+        });
+        // The snapshot is the truth; the percentage only explains it.
+        const feeAmount = Number(booking.service_fee ?? 0);
 
         return {
             booking,
@@ -357,9 +386,27 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
                             : 'Security deposit',
                     amount: deposit,
                 },
-                {key: 'agency_fee', label: 'Agency fee', amount: 0, waived: true},
-                {key: 'platform_fee', label: 'Platform fee', amount: 0, waived: true},
+                {
+                    key: 'service_fee',
+                    label:
+                        feeAmount > 0
+                            ? `HomeMate fee (${fee.percentage}% of one month's rent)`
+                            : 'HomeMate fee',
+                    amount: feeAmount,
+                    waived: feeAmount === 0,
+                    highlight: true,
+                },
             ],
+            // What the customer keeps by not paying the usual agent: one full
+            // month's rent, less the fee they are actually charged. The app
+            // highlights this under the breakdown.
+            serviceFee: {
+                amount: feeAmount,
+                percentage: Number(booking.service_fee_percentage ?? 0),
+                benchmarkAmount: fee.benchmarkAmount,
+                benchmarkLabel: "Usual agent fee (one month's rent)",
+                saving: round2(Math.max(fee.benchmarkAmount - feeAmount, 0)),
+            },
             totalDue: Number(booking.total_due),
             amountPaid: Number(booking.amount_paid),
             amountOutstanding: Number(booking.amount_outstanding),
@@ -623,8 +670,4 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
         getLease,
         savedOverview,
     };
-}
-
-function round2(value) {
-    return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }

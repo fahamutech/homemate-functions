@@ -1,0 +1,72 @@
+name: CI
+
+# Every push and pull request: unit tests, then the integration and end-to-end
+# suites against a real Postgres (with PostGIS, which the schema needs).
+# Migrations run first, exactly as the server runs them on start.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: homemate
+          POSTGRES_PASSWORD: homemate
+          POSTGRES_DB: homemate_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U homemate -d homemate_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The test scripts read .env.test (gitignored); CI writes a throwaway one.
+      - name: Write .env.test
+        run: |
+          cat > .env.test <<'ENV'
+          DATABASE_URL=postgres://homemate:homemate@localhost:5432/homemate_test
+          SESSION_TOKEN_SECRET=ci-only-not-a-secret
+          NOTIFICATION_PROVIDER=sandbox
+          SMS_PROVIDER=sandbox
+          PORT=3000
+          ADMIN_EMAIL=admin@homemate.co.tz
+          ADMIN_PASSWORD=ci-admin-password
+          STORAGE_PROVIDER=memory
+          REVIEW_ACCOUNT_PHONE=+255700000000
+          REVIEW_ACCOUNT_OTP=246810
+          ENV
+
+      - name: Migrate
+        run: npm run migrate:test
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Integration tests
+        run: npm run test:integration
+
+      - name: End-to-end tests
+        run: npm run test:e2e

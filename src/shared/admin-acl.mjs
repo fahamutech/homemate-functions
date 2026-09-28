@@ -25,7 +25,6 @@ const RULES = [
     ['/admin/dictionaries', ['dictionaries']],
     ['/admin/settings', ['settings']],
     ['/admin/inquiries', ['inquiries']],
-    ['/admin/viewings', ['viewings']],
     ['/admin/bookings', ['bookings']],
     ['/admin/payment-queue', ['payments']],
     ['/admin/sms', ['payments']],

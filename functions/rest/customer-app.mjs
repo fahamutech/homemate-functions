@@ -161,74 +161,6 @@ export const appWithdrawInquiry = route({
     handler: (request) => customerApp.withdrawInquiry(me(request), request.params.id),
 });
 
-// --- viewings ----------------------------------------------------------------
-
-export const appListViewings = route({
-    method: 'get',
-    path: '/app/viewings',
-    description: 'Scheduled and past viewings',
-    handler: (request) => customerApp.listViewings(me(request), request.query),
-});
-
-export const appRequestViewing = route({
-    method: 'post',
-    path: '/app/viewings',
-    description: 'Ask to view a property at a time',
-    requestSample: {propertyId: '…', scheduledFor: '2026-10-02T10:00:00Z'},
-    handler: async (request) => ({
-        status: 201,
-        body: await customerApp.requestViewing(me(request), request.body ?? {}),
-    }),
-});
-
-export const appGetViewing = route({
-    method: 'get',
-    path: '/app/viewings/:id',
-    description: 'One viewing, with where to meet',
-    handler: (request) => customerApp.getViewing(me(request), request.params.id),
-});
-
-export const appCancelViewing = route({
-    method: 'post',
-    path: '/app/viewings/:id/cancel',
-    description: 'Cancel a viewing, with a reason',
-    handler: (request) => customerApp.cancelViewing(me(request), request.params.id, request.body?.reason),
-});
-
-// --- bookings ----------------------------------------------------------------
-
-export const appListBookings = route({
-    method: 'get',
-    path: '/app/bookings',
-    description: 'The customer’s bookings and rentals',
-    handler: (request) => customerApp.listBookings(me(request), request.query),
-});
-
-export const appCreateBooking = route({
-    method: 'post',
-    path: '/app/bookings',
-    description: 'Book a property; the terms are copied and the payment is raised',
-    requestSample: {propertyId: '…', moveInDate: '2026-11-01', leaseMonths: 12},
-    handler: async (request) => ({
-        status: 201,
-        body: await customerApp.createBooking(me(request), request.body ?? {}),
-    }),
-});
-
-export const appGetBooking = route({
-    method: 'get',
-    path: '/app/bookings/:id',
-    description: 'One booking with its payments and what is still owed',
-    handler: (request) => customerApp.getBooking(me(request), request.params.id),
-});
-
-export const appCancelBooking = route({
-    method: 'post',
-    path: '/app/bookings/:id/cancel',
-    description: 'Cancel a booking, with a reason',
-    handler: (request) => customerApp.cancelBooking(me(request), request.params.id, request.body?.reason),
-});
-
 // --- payments ----------------------------------------------------------------
 
 export const appListPayments = route({
@@ -387,10 +319,10 @@ export const appReadProfilePhoto = route({
 // --- the journey: holds, checkout, tenancies ---------------------------------
 
 /**
- * CUS-013a in one call. The Favourites screen is four sections — active rents,
- * saved homes, recent enquiries, upcoming viewings — and assembling it out of
- * four requests on a Tanzanian mobile connection is four chances to show a
- * spinner instead of a screen.
+ * CUS-013a in one call. The Favourites screen is three sections — active rents,
+ * saved homes, recent enquiries — and assembling it out of three requests on a
+ * Tanzanian mobile connection is three chances to show a spinner instead of a
+ * screen.
  */
 export const appSavedOverview = route({
     method: 'get',
@@ -400,9 +332,8 @@ export const appSavedOverview = route({
 });
 
 /**
- * "Can I pay for this yet, and how did I get here?" Every Pay button in the
- * app asks this first, so an accepted enquiry, a finished viewing and an
- * outright purchase cannot disagree about who is allowed.
+ * "Can I pay for this yet?" Every Pay button in the app asks this first. The
+ * answer is yes only once the landlord has accepted the customer's enquiry.
  */
 export const appCheckoutEligibility = route({
     method: 'get',
@@ -456,14 +387,14 @@ export const appReleaseHold = route({
 });
 
 /**
- * Turn an intention into something payable: a booking, a payment, and a hold,
- * all in one transaction. Works from an accepted enquiry, from a completed
- * viewing, or from nothing at all.
+ * Turn an accepted enquiry into something payable: a reservation, a payment
+ * (rent, deposit and the HomeMate fee, already split), and a hold, all in one
+ * transaction.
  */
 export const appStartCheckout = route({
     method: 'post',
     path: '/app/properties/:id/checkout',
-    description: 'Start paying for this property, whichever way the customer got here',
+    description: 'Start paying for a property whose enquiry the landlord accepted',
     requestSample: {leaseMonths: 12, moveInDate: '2026-10-01'},
     handler: async (request) => ({
         status: 201,

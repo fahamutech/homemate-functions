@@ -4,9 +4,9 @@ import {route, actorOf} from '../../src/shared/http.mjs';
 import {getPool} from '../../src/db/pool.mjs';
 
 /**
- * The backoffice half of the mobile app: answering what customers ask, meeting
- * them at properties, moving their bookings along, and handling the money they
- * send — which for now is verified by a person reading a bank statement.
+ * The backoffice half of the mobile app: answering what customers ask, looking
+ * after the tenancies that follow, and handling the money they send — which
+ * for now is verified by a person reading a bank statement.
  */
 
 // --- inquiries ----------------------------------------------------------------
@@ -34,37 +34,12 @@ export const adminRespondToInquiry = route({
         adminConsole.customerOps.respondToInquiry(request.params.id, request.body ?? {}, actorOf(request)),
 });
 
-// --- viewings -----------------------------------------------------------------
-
-export const adminListViewings = route({
-    method: 'get',
-    path: '/admin/viewings',
-    description: 'Requested and scheduled property viewings',
-    handler: (request) => adminConsole.customerOps.listViewings(request.query),
-});
-
-export const adminGetViewing = route({
-    method: 'get',
-    path: '/admin/viewings/:id',
-    description: 'One viewing with the customer and the host',
-    handler: (request) => adminConsole.customerOps.getViewing(request.params.id),
-});
-
-export const adminChangeViewingStatus = route({
-    method: 'post',
-    path: '/admin/viewings/:id/status',
-    description: 'Confirm, reschedule, complete or cancel a viewing',
-    requestSample: {status: 'confirmed', meetingPoint: 'Main gate'},
-    handler: (request) =>
-        adminConsole.customerOps.changeViewingStatus(request.params.id, request.body ?? {}, actorOf(request)),
-});
-
 // --- bookings ------------------------------------------------------------------
 
 export const adminListBookings = route({
     method: 'get',
     path: '/admin/bookings',
-    description: 'Bookings and active rentals',
+    description: 'Reservations and the tenancies they became',
     handler: (request) => adminConsole.customerOps.listBookings(request.query),
 });
 
@@ -78,8 +53,8 @@ export const adminGetBooking = route({
 export const adminChangeBookingStatus = route({
     method: 'post',
     path: '/admin/bookings/:id/status',
-    description: 'Move a booking along — confirming is refused until it is paid',
-    requestSample: {status: 'confirmed'},
+    description: 'Start (active) or end (completed) a tenancy',
+    requestSample: {status: 'active'},
     handler: (request) =>
         adminConsole.customerOps.changeBookingStatus(request.params.id, request.body ?? {}, actorOf(request)),
 });

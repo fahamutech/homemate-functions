@@ -317,7 +317,7 @@ describe('kyc and money (Postgres integration)', () => {
     // --- Money ---------------------------------------------------------------
 
     describe('collection', () => {
-        test('splits rent between landlord, broker and the platform', async () => {
+        test('rent recorded by hand is the landlord’s whole — commission comes only from the tenant fee', async () => {
             const landlord = await makeUser({role: 'landlord', fullName: 'Landlord'});
             const broker = await makeUser({role: 'broker', fullName: 'Broker'});
             const tenant = await makeUser({role: 'customer', fullName: 'Tenant'});
@@ -340,9 +340,9 @@ describe('kyc and money (Postgres integration)', () => {
             const byType = Object.fromEntries(
                 payment.splits.map((s) => [s.beneficiary_type, Number(s.amount)])
             );
-            assert.equal(byType.platform, 100000); // 10% default commission
-            assert.equal(byType.broker, 50000); //  5% of the rent
-            assert.equal(byType.landlord, 850000); // the remainder
+            assert.equal(byType.platform, undefined, 'HomeMate takes nothing from rent');
+            assert.equal(byType.broker, undefined, 'nor does the broker');
+            assert.equal(byType.landlord, 1000000);
             assert.equal(
                 payment.splits.reduce((sum, s) => sum + Number(s.amount), 0),
                 1000000
@@ -416,8 +416,8 @@ describe('kyc and money (Postgres integration)', () => {
 
             const accounts = Object.fromEntries(settled.ledger.map((e) => [e.account, Number(e.amount)]));
             assert.equal(accounts['cash.collections'], 1000000);
-            assert.equal(accounts['revenue.commission'], 100000);
-            assert.equal(accounts['liability.payable.landlord'], 900000);
+            assert.equal(accounts['revenue.commission'], undefined);
+            assert.equal(accounts['liability.payable.landlord'], 1000000);
         });
 
         test('a provider failure records the reason and leaves nothing payable', async () => {
@@ -518,7 +518,7 @@ describe('kyc and money (Postgres integration)', () => {
             const {items} = await money.outstandingBalances();
             assert.equal(items.length, 1);
             assert.equal(items[0].beneficiary_user_id, landlord.id);
-            assert.equal(Number(items[0].amount_due), 900000);
+            assert.equal(Number(items[0].amount_due), 1000000);
         });
 
         test('a payout claims the splits and its amount is their sum', async () => {
@@ -530,7 +530,7 @@ describe('kyc and money (Postgres integration)', () => {
             );
 
             assert.match(payout.reference, /^HM-PO-\d{6}$/);
-            assert.equal(Number(payout.amount), 900000);
+            assert.equal(Number(payout.amount), 1000000);
             assert.equal(payout.status, 'scheduled');
             assert.equal(payout.destination, '+255754000111');
             assert.equal(payout.splits.length, 1);
@@ -579,8 +579,8 @@ describe('kyc and money (Postgres integration)', () => {
             assert.ok(paid.paid_at);
 
             const accounts = Object.fromEntries(paid.ledger.map((e) => [e.account, Number(e.amount)]));
-            assert.equal(accounts['liability.payable.landlord'], 900000);
-            assert.equal(accounts['cash.disbursements'], 900000);
+            assert.equal(accounts['liability.payable.landlord'], 1000000);
+            assert.equal(accounts['cash.disbursements'], 1000000);
         });
 
         test('cancelling a payout makes the money payable again', async () => {
@@ -594,7 +594,7 @@ describe('kyc and money (Postgres integration)', () => {
 
             const {items} = await money.outstandingBalances();
             assert.equal(items.length, 1);
-            assert.equal(Number(items[0].amount_due), 900000);
+            assert.equal(Number(items[0].amount_due), 1000000);
         });
 
         test('a failed payout carries a reason and can be rescheduled', async () => {
@@ -656,8 +656,8 @@ describe('kyc and money (Postgres integration)', () => {
 
             const summary = await money.summary();
             assert.equal(Number(summary.collected), 1000000);
-            assert.equal(Number(summary.disbursed), 900000);
-            assert.equal(Number(summary.platform_revenue), 100000);
+            assert.equal(Number(summary.disbursed), 1000000);
+            assert.equal(Number(summary.platform_revenue), 0);
             assert.equal(Number(summary.owed), 0);
         });
 
@@ -830,8 +830,6 @@ describe('kyc and money (Postgres integration)', () => {
                 staff: 0,
                 payments: 0,
                 inquiries: 0,
-                viewings: 0,
-                bookings: 0,
             });
         });
 

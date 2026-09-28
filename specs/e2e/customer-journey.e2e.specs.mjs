@@ -9,8 +9,9 @@ import {smsPort} from '../../src/services/customer-access/container.mjs';
 
 /**
  * The journey the mobile app walks, end to end over real HTTP: prove a phone
- * once, choose a PIN, find a home, ask about it, arrange a viewing, book it,
- * be told where to pay, say you have paid, and have a human confirm it.
+ * once, choose a PIN, find a home, ask about it, be accepted, start paying
+ * (rent, deposit and the HomeMate fee), be told where to pay, say you have
+ * paid, and have a human verify it — which is what confirms the home.
  *
  * The SMS provider here is the sandbox adapter, so the code can be read back
  * the way a real customer reads it off their phone.
@@ -138,7 +139,7 @@ describe('journey: customer app (e2e)', () => {
         return session.body.token;
     }
 
-    test('the whole journey: verify, set a PIN, enquire, view, book and pay', async () => {
+    test('the whole journey: verify, set a PIN, enquire, be accepted, pay, be verified', async () => {
         // --- 1. Onboarding -----------------------------------------------------
         const requested = await api('/customer/auth/otp/request', {
             method: 'POST',
@@ -240,42 +241,41 @@ describe('journey: customer app (e2e)', () => {
         assert.equal(answered.body.status, 'responded');
         assert.equal(answered.body.response, 'Yes, from 1 November');
 
-        // --- 5. Arranging a viewing ----------------------------------------------
-        const when = new Date(Date.now() + 3 * 86400_000).toISOString();
-        const viewing = await api('/app/viewings', {
+        // Nothing can be paid for until the landlord accepts.
+        const notYet = await api(`/app/properties/${propertyId}/checkout`, {method: 'POST', token, body: {}});
+        assert.equal(notYet.status, 400, JSON.stringify(notYet.body));
+        assert.match(notYet.body.message, /enquiry first/);
+
+        // --- 5. The landlord accepts (the portal's job) ------------------------------
+        const accepted = await api(`/admin/inquiries/${inquiry.body.id}/respond`, {
+            method: 'POST',
+            token: adminToken,
+            body: {status: 'accepted', response: 'Yes — it is yours if you pay to secure it'},
+        });
+        assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+
+        const eligibility = await api(`/app/properties/${propertyId}/checkout`, {token});
+        assert.equal(eligibility.body.canPay, true);
+        assert.equal(eligibility.body.route, 'inquiry_accepted');
+
+        // --- 6. Checkout ------------------------------------------------------------
+        const checkout = await api(`/app/properties/${propertyId}/checkout`, {
             method: 'POST',
             token,
-            body: {propertyId, inquiryId: inquiry.body.id, scheduledFor: when, meetingPoint: 'Main gate'},
+            body: {moveInDate: '2026-11-01'},
         });
-        assert.equal(viewing.status, 201, JSON.stringify(viewing.body));
-        assert.equal(viewing.body.status, 'requested');
-        assert.equal(viewing.body.host_name, 'Baraka Landlord');
+        assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
+        const {summary: checkoutSummary} = checkout.body;
+        assert.match(checkoutSummary.booking.reference, /^HM-BK-\d{6}$/);
+        assert.equal(checkoutSummary.booking.status, 'awaiting_payment');
+        // 2 months deposit + 1 month rent + the HomeMate fee of half a month
+        assert.equal(Number(checkoutSummary.totalDue), 2800000);
+        assert.equal(Number(checkoutSummary.serviceFee.amount), 400000);
+        assert.equal(Number(checkoutSummary.serviceFee.saving), 400000);
 
-        const inThePast = await api('/app/viewings', {
-            method: 'POST',
-            token,
-            body: {propertyId, scheduledFor: new Date(Date.now() - 86400_000).toISOString()},
-        });
-        assert.equal(inThePast.status, 422);
-
-        await db.query("update property_viewings set status = 'confirmed' where id = $1", [viewing.body.id]);
-        const confirmed = await api(`/app/viewings/${viewing.body.id}`, {token});
-        assert.equal(confirmed.body.status, 'confirmed');
-
-        // --- 6. Booking ------------------------------------------------------------
-        const booking = await api('/app/bookings', {
-            method: 'POST',
-            token,
-            body: {propertyId, inquiryId: inquiry.body.id, viewingId: viewing.body.id, moveInDate: '2026-11-01'},
-        });
-        assert.equal(booking.status, 201, JSON.stringify(booking.body));
-        assert.match(booking.body.reference, /^HM-BK-\d{6}$/);
-        assert.equal(booking.body.status, 'awaiting_payment');
-        assert.equal(Number(booking.body.total_due), 2400000); // 2 months deposit + 1 month rent
-        assert.equal(booking.body.payments.length, 1);
-
-        const paymentId = booking.body.payments[0].id;
-        assert.equal(booking.body.payments[0].customer_state, 'awaiting_instructions');
+        const paymentId = checkout.body.paymentId;
+        const bookingReference = checkoutSummary.booking.reference;
+        assert.equal(checkoutSummary.payments[0].customer_state, 'awaiting_instructions');
 
         // Nothing to pay against yet, so the app is told to wait.
         const tooSoon = await api(`/app/payments/${paymentId}/declare`, {method: 'POST', token, body: {}});
@@ -290,7 +290,7 @@ describe('journey: customer app (e2e)', () => {
                 displayName: 'HomeMate Africa Ltd',
                 accountName: 'HomeMate Africa',
                 accountNumber: '5566778',
-                paymentReference: booking.body.reference,
+                paymentReference: bookingReference,
                 instructions: 'Send to Lipa Namba 5566778 and quote the reference.',
             },
         });
@@ -299,7 +299,7 @@ describe('journey: customer app (e2e)', () => {
         const payable = await api(`/app/payments/${paymentId}`, {token});
         assert.equal(payable.body.customer_state, 'awaiting_payment');
         assert.equal(payable.body.pay_to_account_number, '5566778');
-        assert.equal(payable.body.pay_reference, booking.body.reference);
+        assert.equal(payable.body.pay_reference, bookingReference);
         assert.match(payable.body.pay_instructions, /Lipa Namba/);
 
         // --- 8. "I have paid" -------------------------------------------------------
@@ -329,19 +329,14 @@ describe('journey: customer app (e2e)', () => {
         assert.equal(verifiedPayment.body.status, 'successful');
         assert.equal(verifiedPayment.body.confirmed_by, process.env.ADMIN_EMAIL);
 
-        const settled = await api(`/app/bookings/${booking.body.id}`, {token});
-        assert.equal(Number(settled.body.amount_paid), 2400000);
-        assert.equal(Number(settled.body.amount_outstanding), 0);
-        assert.equal(settled.body.payments[0].customer_state, 'paid');
+        const settled = await api(`/app/payments/${paymentId}`, {token});
+        assert.equal(settled.body.customer_state, 'paid');
 
-        // And only now may the booking be confirmed.
-        const confirmedBooking = await api(`/admin/bookings/${booking.body.id}/status`, {
-            method: 'POST',
-            token: adminToken,
-            body: {status: 'confirmed'},
-        });
-        assert.equal(confirmedBooking.status, 200, JSON.stringify(confirmedBooking.body));
-        assert.equal(confirmedBooking.body.status, 'confirmed');
+        // Verifying the money is what confirms the home — there is no second,
+        // manual step for anyone to forget.
+        const rentals = await api('/app/rentals', {token});
+        assert.equal(rentals.body.items.length, 1, JSON.stringify(rentals.body));
+        assert.equal(rentals.body.items[0].status, 'confirmed');
 
         // --- 10. The customer's own summary -------------------------------------------
         const summary = await api('/app/summary', {token});
@@ -460,17 +455,16 @@ describe('journey: customer app (e2e)', () => {
             token: mine,
             body: {propertyId, message: 'Mine alone'},
         });
-        const booking = await api('/app/bookings', {method: 'POST', token: mine, body: {propertyId}});
+        await db.query("update property_inquiries set status = 'accepted' where id = $1", [inquiry.body.id]);
+        const checkout = await api(`/app/properties/${propertyId}/checkout`, {method: 'POST', token: mine, body: {}});
+        assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
 
         await db.query("update otp_request_log set created_at = now() - interval '5 minutes'");
         const theirs = await onboard({phoneNumber: '+255713000002', pin: '5731'});
 
         assert.equal((await api(`/app/inquiries/${inquiry.body.id}`, {token: theirs})).status, 404);
-        assert.equal((await api(`/app/bookings/${booking.body.id}`, {token: theirs})).status, 404);
-        assert.equal(
-            (await api(`/app/payments/${booking.body.payments[0].id}`, {token: theirs})).status,
-            404
-        );
+        assert.equal((await api(`/app/rentals/${checkout.body.bookingId}`, {token: theirs})).status, 404);
+        assert.equal((await api(`/app/payments/${checkout.body.paymentId}`, {token: theirs})).status, 404);
         assert.equal((await api('/app/saved', {token: theirs})).body.items.length, 0);
     });
 
@@ -480,8 +474,7 @@ describe('journey: customer app (e2e)', () => {
             '/app/properties',
             '/app/saved',
             '/app/inquiries',
-            '/app/viewings',
-            '/app/bookings',
+            '/app/rentals',
             '/app/payments',
             '/app/notifications',
             '/app/summary',

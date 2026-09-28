@@ -92,8 +92,6 @@ export function createInsightsService({pool}) {
                     (counts.paymentsDeclared ?? 0) +
                     (counts.paymentsNeedingInstructions ?? 0),
                 inquiries: counts.inquiriesPending ?? 0,
-                viewings: counts.viewingsRequested ?? 0,
-                bookings: counts.bookingsPending ?? 0,
             },
         };
     }

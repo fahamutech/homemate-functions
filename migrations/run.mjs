@@ -29,15 +29,14 @@ const LOCK_ID = 8_147_320_115;
  *
  * `--check` reports what would run and changes nothing, which is what a deploy
  * script uses to decide whether a database step is needed at all.
+ *
+ * Importable as well as runnable, so the server brings its own database up to
+ * date on start (`functions/index.mjs`). `log` defaults to the console; pass `() => {}` to silence it.
+ *
+ * Returns the names applied (or, with `checkOnly`, the names pending).
  */
-async function main() {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) {
-        console.error('DATABASE_URL is not set');
-        process.exit(1);
-    }
-
-    const checkOnly = process.argv.includes('--check');
+export async function migrate({connectionString = process.env.DATABASE_URL, checkOnly = false, log = console.log} = {}) {
+    if (!connectionString) throw new Error('DATABASE_URL is not set');
 
     const files = readdirSync(__dirname)
         .filter((name) => name.endsWith('.sql'))
@@ -56,7 +55,8 @@ async function main() {
         `);
 
         if (!checkOnly) {
-            // Blocks rather than failing: a concurrent deploy is something to
+            // Blocks rather than failing: a concurrent deploy (or a second
+            // server instance starting at the same moment) is something to
             // wait for, not an error.
             await client.query('select pg_advisory_lock($1)', [LOCK_ID]);
             locked = true;
@@ -66,26 +66,11 @@ async function main() {
         const applied = new Set(rows.map((r) => r.name));
         const pending = files.filter((file) => !applied.has(file));
 
-        if (checkOnly) {
-            if (pending.length === 0) {
-                console.log('migrations up to date');
-            } else {
-                console.log(`${pending.length} pending:`);
-                for (const file of pending) console.log(`  ${file}`);
-            }
-            // A deploy script branches on this: 0 = nothing to do, 10 = work
-            // pending. Anything else is a genuine failure.
-            process.exitCode = pending.length === 0 ? 0 : 10;
-            return;
-        }
+        if (checkOnly) return pending;
 
-        for (const file of files) {
-            if (applied.has(file)) {
-                console.log(`skip  ${file} (already applied)`);
-                continue;
-            }
+        for (const file of pending) {
             const sql = readFileSync(join(__dirname, file), 'utf8');
-            console.log(`apply ${file}`);
+            log(`apply ${file}`);
             await client.query('begin');
             try {
                 await client.query(sql);
@@ -93,10 +78,11 @@ async function main() {
                 await client.query('commit');
             } catch (err) {
                 await client.query('rollback');
-                throw err;
+                throw new Error(`Migration ${file} failed: ${err.message}`, {cause: err});
             }
         }
-        console.log('migrations up to date');
+        log('migrations up to date');
+        return pending;
     } finally {
         if (locked) {
             await client.query('select pg_advisory_unlock($1)', [LOCK_ID]).catch(() => {});
@@ -105,7 +91,26 @@ async function main() {
     }
 }
 
-main().catch((err) => {
-    console.error(err);
-    process.exit(1);
-});
+async function main() {
+    const checkOnly = process.argv.includes('--check');
+    const pending = await migrate({checkOnly});
+    if (checkOnly) {
+        if (pending.length === 0) {
+            console.log('migrations up to date');
+        } else {
+            console.log(`${pending.length} pending:`);
+            for (const file of pending) console.log(`  ${file}`);
+        }
+        // A deploy script branches on this: 0 = nothing to do, 10 = work
+        // pending. Anything else is a genuine failure.
+        process.exitCode = pending.length === 0 ? 0 : 10;
+    }
+}
+
+// Only when run directly (`node migrations/run.mjs`), not when imported.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+    main().catch((err) => {
+        console.error(err);
+        process.exit(1);
+    });
+}

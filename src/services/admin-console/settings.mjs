@@ -1,5 +1,9 @@
 import {withActor, query, nullIfBlank} from '../../shared/db.mjs';
 import {notFound, invalid} from '../../shared/errors.mjs';
+import {FEE_SETTING_KEYS} from '../../shared/fees.mjs';
+
+/** Settings the money depends on, which must stay a number from 0 to 100. */
+const PERCENTAGE_KEYS = new Set(Object.values(FEE_SETTING_KEYS));
 
 /**
  * Platform settings. Versioning is a database trigger (settings_history), so
@@ -23,10 +27,18 @@ export function createSettingsService({pool}) {
         return {items: rows, grouped};
     }
 
-    async function update(key, {value}, actor) {
+    async function update(key, {value: raw}, actor) {
+        let value = raw;
         const settingKey = nullIfBlank(key);
         if (!settingKey) throw invalid('key is required');
         if (value === undefined) throw invalid('value is required');
+        if (PERCENTAGE_KEYS.has(settingKey)) {
+            const number = Number(value);
+            if (typeof value === 'boolean' || value === null || value === '' || !Number.isFinite(number) || number < 0 || number > 100) {
+                throw invalid('This setting is a percentage, so it must be a number from 0 to 100');
+            }
+            value = number;
+        }
 
         return withActor(pool, actor, async (client) => {
             const {rows} = await client.query(

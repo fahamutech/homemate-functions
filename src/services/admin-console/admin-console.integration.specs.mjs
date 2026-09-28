@@ -575,18 +575,30 @@ describe('admin console (Postgres integration)', () => {
         }
 
         test('updates a value and records history with the actor', async () => {
-            const before = await currentValue('commission.broker_percentage');
-            const next = before + 1;
+            const before = await currentValue('commission.platform_percentage');
+            const next = before === 99 ? 98 : before + 1;
 
-            const updated = await settings.update('commission.broker_percentage', {value: next}, ACTOR);
+            const updated = await settings.update('commission.platform_percentage', {value: next}, ACTOR);
             assert.equal(Number(updated.value), next);
             assert.equal(updated.updated_by, ACTOR);
 
-            const {items} = await settings.history('commission.broker_percentage');
+            const {items} = await settings.history('commission.platform_percentage');
             assert.equal(items.length, 1);
             assert.equal(Number(items[0].old_value), before);
             assert.equal(Number(items[0].new_value), next);
             assert.equal(items[0].changed_by, ACTOR);
+        });
+
+        test('the fee percentages must stay a number from 0 to 100', async () => {
+            for (const bad of [101, -1, 'half', null, true]) {
+                await assert.rejects(
+                    settings.update('commission.tenant_fee_percentage', {value: bad}, ACTOR),
+                    (error) => /percentage/.test(error.message)
+                );
+            }
+            const updated = await settings.update('commission.tenant_fee_percentage', {value: '40'}, ACTOR);
+            assert.equal(updated.value, 40, 'stored as a number, not the string the form sent');
+            await settings.update('commission.tenant_fee_percentage', {value: 50}, ACTOR);
         });
 
         test('writing the same value again records no new history row', async () => {

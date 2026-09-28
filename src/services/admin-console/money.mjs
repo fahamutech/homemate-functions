@@ -4,12 +4,13 @@ import {notFound, invalid} from '../../shared/errors.mjs';
 /**
  * Money: collection in, disbursement out.
  *
- * HomeMate connects a tenant to a landlord, an agency and/or a broker. Rent is
- * collected once and then belongs to several people at once, so every payment
- * is split the moment it is recorded: the landlord's share, the broker's and
- * agency's commissions, and whatever HomeMate retains. The splits must add up
- * to the payment — a deferred constraint trigger refuses a commit where they
- * do not, so a rounding mistake cannot silently create or destroy money.
+ * HomeMate connects a tenant to a landlord, an agency and/or a broker. Money
+ * is collected once and then belongs to several people at once, so every
+ * payment is split the moment it is recorded. The first payment carries the
+ * tenant fee, which is where HomeMate's commission and the agent's share come
+ * from; rent itself is always the landlord's. The splits must add up to the
+ * payment — a deferred constraint trigger refuses a commit where they do not,
+ * so a rounding mistake cannot silently create or destroy money.
  *
  * What this service deliberately does NOT do:
  *   - decide a payment succeeded (only a provider callback or an authorised
@@ -428,6 +429,63 @@ export function createMoneyService({pool, paymentPorts = {}}) {
         return {...rows[0], ...payoutRows[0], ...owed[0], ...commission[0]};
     }
 
+    /**
+     * Listing commissions: for every reservation that carried a tenant fee,
+     * what the fee was, HomeMate's share of it, and the listing agent's share.
+     * This is the whole of HomeMate's commission — rent is never commissioned
+     * — so the totals here are the platform's revenue from placements.
+     *
+     * `settled` means the payment the fee rode in on has been verified; until
+     * then the commission is earned on paper only.
+     */
+    async function commissions(filters = {}) {
+        const {limit, offset} = pageParams(filters);
+        const {rows} = await query(
+            pool,
+            `select b.id, b.reference, b.status, b.created_at, b.confirmed_at,
+                    b.property_id, b.property_reference, b.property_title,
+                    b.customer_id, b.customer_name, b.monthly_rent, b.currency,
+                    b.service_fee, b.service_fee_percentage, b.platform_fee_percentage,
+                    b.platform_fee, b.service_fee - b.platform_fee as agent_fee,
+                    b.amount_paid >= b.total_due as settled,
+                    agent.beneficiary_type as agent_type,
+                    agent.beneficiary_user_id as agent_user_id,
+                    agent_user.full_name as agent_name,
+                    count(*) over () as total_count
+               from v_bookings b
+               left join lateral (
+                   select s.beneficiary_type::text, s.beneficiary_user_id
+                     from payments pay
+                     join payment_splits s on s.payment_id = pay.id
+                    where pay.booking_id = b.id and s.beneficiary_type in ('broker', 'agency')
+                    order by pay.created_at
+                    limit 1
+               ) agent on true
+               left join users agent_user on agent_user.id = agent.beneficiary_user_id
+              where b.service_fee > 0
+                and ($1::text is null
+                     or b.reference ilike '%' || $1 || '%'
+                     or b.property_title ilike '%' || $1 || '%'
+                     or b.customer_name ilike '%' || $1 || '%')
+                and ($2::boolean is null or (b.amount_paid >= b.total_due) = $2)
+              order by b.created_at desc
+              limit $3 offset $4`,
+            [nullIfBlank(filters.query), booleanFilter(filters.settled), limit, offset]
+        );
+
+        const {rows: totals} = await query(
+            pool,
+            `select coalesce(sum(service_fee), 0) as fees,
+                    coalesce(sum(platform_fee), 0) as platform,
+                    coalesce(sum(service_fee - platform_fee), 0) as agents,
+                    coalesce(sum(platform_fee) filter (where amount_paid >= total_due), 0) as platform_settled,
+                    count(*) as placements
+               from v_bookings where service_fee > 0 and status <> 'cancelled'`
+        );
+
+        return {...toPage(rows, {limit, offset}), totals: totals[0]};
+    }
+
     async function ledger(filters = {}) {
         const {limit, offset} = pageParams(filters);
         const {rows} = await query(
@@ -446,61 +504,25 @@ export function createMoneyService({pool, paymentPorts = {}}) {
     // --- internals -----------------------------------------------------------
 
     /**
-     * Derives the split from the property's own parties. The landlord gets
-     * what is left after HomeMate's commission and any party commissions,
-     * and the remainder is assigned to the last share so the rows always add
-     * up to the payment exactly — no rounding dust.
+     * A payment recorded by hand — a month's rent, usually — belongs to the
+     * landlord whole. HomeMate's commission, and the agent's, come only from
+     * the tenant fee, and that is split at checkout where the fee is known
+     * (`src/shared/fees.mjs`). Nothing is taken out of rent.
      */
     async function deriveSplits(client, propertyId, amount) {
         const {rows: parties} = await client.query(
-            `select role, user_id, commission_percentage
-               from property_parties
-              where property_id = $1 and is_primary
-              order by role`,
+            `select user_id from property_parties
+              where property_id = $1 and is_primary and role = 'landlord' and user_id is not null
+              limit 1`,
             [propertyId]
         );
-
-        const platformPercentage = await numericSetting(client, 'commission.platform_percentage', 10);
-        const shares = [];
-
-        const platformAmount = round2((amount * platformPercentage) / 100);
-        shares.push({beneficiaryType: 'platform', amount: platformAmount, percentage: platformPercentage});
-
-        for (const party of parties) {
-            if (party.role === 'landlord') continue;
-            const type = BENEFICIARY_ROLE_COLUMN[party.role];
-            if (!type || !party.user_id) continue;
-            const percentage = Number(party.commission_percentage ?? 0);
-            if (percentage <= 0) continue;
-            shares.push({
-                beneficiaryType: type,
-                beneficiaryUserId: party.user_id,
-                amount: round2((amount * percentage) / 100),
-                percentage,
-            });
-        }
-
         // The landlord is whoever is assigned that role on the property; a
         // property created before parties were assigned falls back to its owner.
-        const landlord =
-            parties.find((p) => p.role === 'landlord' && p.user_id) ??
-            (await ownerOf(client, propertyId));
+        const landlord = parties[0] ?? (await ownerOf(client, propertyId));
         if (!landlord?.user_id) {
             throw invalid('This property has no landlord on file, so the rent cannot be split');
         }
-
-        const assigned = shares.reduce((sum, share) => sum + share.amount, 0);
-        const remainder = round2(amount - assigned);
-        if (remainder < 0) {
-            throw invalid('Configured commissions exceed the payment amount');
-        }
-        shares.push({
-            beneficiaryType: 'landlord',
-            beneficiaryUserId: landlord.user_id,
-            amount: remainder,
-        });
-
-        return shares;
+        return [{beneficiaryType: 'landlord', beneficiaryUserId: landlord.user_id, amount: round2(amount)}];
     }
 
     async function ownerOf(client, propertyId) {
@@ -545,9 +567,16 @@ export function createMoneyService({pool, paymentPorts = {}}) {
         createPayout,
         changePayoutStatus,
         summary,
+        commissions,
         ledger,
         providers: Object.keys(paymentPorts),
     };
+}
+
+function booleanFilter(value) {
+    if (value === true || value === 'true') return true;
+    if (value === false || value === 'false') return false;
+    return null;
 }
 
 function round2(value) {

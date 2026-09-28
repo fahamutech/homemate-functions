@@ -413,10 +413,10 @@ describe('journey: admin backoffice console (e2e)', () => {
 
     test('journey: change a setting and read back its version history', async () => {
         const before = await api('/admin/settings');
-        const current = Number(before.body.items.find((s) => s.key === 'commission.broker_percentage').value);
-        const next = current + 1;
+        const current = Number(before.body.items.find((s) => s.key === 'commission.platform_percentage').value);
+        const next = current === 99 ? 98 : current + 1;
 
-        const updated = await api('/admin/settings/commission.broker_percentage', {
+        const updated = await api('/admin/settings/commission.platform_percentage', {
             method: 'PATCH',
             body: {value: next},
         });
@@ -424,7 +424,7 @@ describe('journey: admin backoffice console (e2e)', () => {
         assert.equal(Number(updated.body.value), next);
         assert.equal(updated.body.updated_by, process.env.ADMIN_EMAIL);
 
-        const history = await api('/admin/settings/commission.broker_percentage/history');
+        const history = await api('/admin/settings/commission.platform_percentage/history');
         assert.ok(history.body.items.length >= 1);
         assert.equal(Number(history.body.items[0].new_value), next);
         assert.equal(history.body.items[0].changed_by, process.env.ADMIN_EMAIL);

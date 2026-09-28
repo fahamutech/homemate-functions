@@ -1,10 +1,10 @@
 import {withActor, query, toPage, pageParams, nullIfBlank} from '../../shared/db.mjs';
 import {notFound, invalid, DomainError, ErrorCodes} from '../../shared/errors.mjs';
-import {resolveLeaseMonths} from './lease-terms.mjs';
+import {loadFeeSettings, tenantFee} from '../../shared/fees.mjs';
 
 /**
  * Everything the mobile app does once someone is signed in: browse, save, ask,
- * arrange a viewing, book, and pay.
+ * and pay once the landlord has said yes.
  *
  * Two rules shape this whole module:
  *
@@ -17,10 +17,6 @@ import {resolveLeaseMonths} from './lease-terms.mjs';
  */
 
 const CONTACT_PREFERENCES = ['phone', 'sms', 'whatsapp', 'email', 'in_app'];
-
-// Mirrors property_viewings_duration_sane in 013_customer_domain.sql.
-const VIEWING_MIN_MINUTES = 15;
-const VIEWING_MAX_MINUTES = 240;
 
 export function createCustomerAppService({pool}) {
     // --- discovery -----------------------------------------------------------
@@ -111,7 +107,22 @@ export function createCustomerAppService({pool}) {
         const detail = rows[0]?.detail;
         if (!detail?.property) throw notFound('Property');
         if (detail.property.status !== 'approved') throw notFound('Property');
-        return detail;
+
+        // The fee this listing will carry at checkout, and what it saves
+        // against the usual month's agent fee — shown before anyone enquires,
+        // so the first time a customer meets the fee is not at the till.
+        const settings = await loadFeeSettings(pool);
+        const fee = tenantFee(detail.property.price, settings);
+        return {
+            ...detail,
+            serviceFee: {
+                amount: fee.amount,
+                percentage: fee.percentage,
+                benchmarkAmount: fee.benchmarkAmount,
+                benchmarkLabel: "Usual agent fee (one month's rent)",
+                saving: fee.saving,
+            },
+        };
     }
 
     // --- reference data ------------------------------------------------------
@@ -278,232 +289,6 @@ export function createCustomerAppService({pool}) {
             }
             return id;
         }).then(() => getInquiry(customerId, id));
-    }
-
-    // --- viewings ------------------------------------------------------------
-
-    async function listViewings(customerId, filters = {}) {
-        const {limit, offset} = pageParams(filters);
-        const {rows} = await query(pool, 'select * from search_viewings($1, $2, $3, null, $4, $5, $6)', [
-            nullIfBlank(filters.query),
-            nullIfBlank(filters.status),
-            customerId,
-            filters.upcomingOnly === true || filters.upcomingOnly === 'true',
-            limit,
-            offset,
-        ]);
-        return toPage(rows, {limit, offset});
-    }
-
-    async function getViewing(customerId, id) {
-        const {rows} = await query(pool, 'select * from v_viewings where id = $1 and customer_id = $2', [
-            id,
-            customerId,
-        ]);
-        if (rows.length === 0) throw notFound('Viewing');
-        return rows[0];
-    }
-
-    /**
-     * A viewing lasts between a quarter of an hour and four hours (the table's
-     * own check). An omitted value is not a zero-minute viewing — it means
-     * "use the usual half hour", so it has to stay null all the way to the
-     * insert's `coalesce`, and anything else is rejected here with a sentence
-     * rather than by the database with a constraint name.
-     */
-    function viewingDuration(value) {
-        if (value === undefined || value === null || value === '') return null;
-        const minutes = Number(value);
-        if (!Number.isInteger(minutes)) throw invalid('Duration must be a whole number of minutes');
-        if (minutes < VIEWING_MIN_MINUTES || minutes > VIEWING_MAX_MINUTES) {
-            throw invalid(
-                `A viewing must last between ${VIEWING_MIN_MINUTES} minutes and ${VIEWING_MAX_MINUTES / 60} hours`
-            );
-        }
-        return minutes;
-    }
-
-    async function requestViewing(customerId, input) {
-        const propertyId = nullIfBlank(input.propertyId);
-        const scheduledFor = nullIfBlank(input.scheduledFor);
-        if (!propertyId) throw invalid('propertyId is required');
-        if (!scheduledFor) throw invalid('Please choose a date and time');
-        const durationMinutes = viewingDuration(input.durationMinutes);
-
-        return withActor(pool, customerId, async (client) => {
-            const {rows: property} = await client.query(
-                `select p.id, lp.user_id as host_id
-                   from properties p
-                   left join property_parties lp
-                     on lp.property_id = p.id and lp.is_primary and lp.role in ('landlord', 'broker', 'agency')
-                  where p.id = $1 and p.status = 'approved'
-                  order by case lp.role when 'broker' then 1 when 'agency' then 2 else 3 end
-                  limit 1`,
-                [propertyId]
-            );
-            if (property.length === 0) throw notFound('Property');
-
-            const {rows} = await client.query(
-                `insert into property_viewings
-                     (property_id, customer_id, inquiry_id, scheduled_for, duration_minutes,
-                      host_id, meeting_point, customer_note)
-                 values ($1, $2, $3, $4::timestamptz, coalesce($5, 30), $6, $7, $8)
-                 returning id`,
-                [
-                    propertyId,
-                    customerId,
-                    nullIfBlank(input.inquiryId),
-                    scheduledFor,
-                    durationMinutes,
-                    property[0].host_id,
-                    nullIfBlank(input.meetingPoint),
-                    nullIfBlank(input.note),
-                ]
-            );
-            return rows[0].id;
-        }).then((id) => getViewing(customerId, id));
-    }
-
-    async function cancelViewing(customerId, id, reason) {
-        const why = nullIfBlank(reason);
-        if (!why) throw invalid('Please say why you are cancelling');
-
-        return withActor(pool, customerId, async (client) => {
-            const {rows} = await client.query(
-                `update property_viewings
-                    set status = 'cancelled', cancellation_reason = $3
-                  where id = $1 and customer_id = $2
-                  returning id`,
-                [id, customerId, why]
-            );
-            if (rows.length === 0) throw notFound('Viewing');
-            return id;
-        }).then(() => getViewing(customerId, id));
-    }
-
-    // --- bookings ------------------------------------------------------------
-
-    async function listBookings(customerId, filters = {}) {
-        const {limit, offset} = pageParams(filters);
-        const {rows} = await query(pool, 'select * from search_bookings($1, $2, $3, null, $4, $5)', [
-            nullIfBlank(filters.query),
-            nullIfBlank(filters.status),
-            customerId,
-            limit,
-            offset,
-        ]);
-        return toPage(rows, {limit, offset});
-    }
-
-    async function getBooking(customerId, id) {
-        const {rows} = await query(pool, 'select * from v_bookings where id = $1 and customer_id = $2', [
-            id,
-            customerId,
-        ]);
-        if (rows.length === 0) throw notFound('Booking');
-
-        const {rows: payments} = await query(
-            pool,
-            'select * from v_customer_payments where booking_id = $1 order by created_at',
-            [id]
-        );
-        return {...rows[0], payments};
-    }
-
-    /**
-     * Booking copies the terms off the property as they stand now — rent,
-     * deposit, advance — so a later price change cannot silently rewrite what
-     * someone agreed to. The total due is computed here from those copied
-     * terms and is what the payment must cover.
-     */
-    async function createBooking(customerId, input) {
-        const propertyId = nullIfBlank(input.propertyId);
-        if (!propertyId) throw invalid('propertyId is required');
-
-        return withActor(pool, customerId, async (client) => {
-            const {rows: property} = await client.query(
-                `select id, price, currency, deposit_months, advance_rent_months,
-                        payment_frequency, min_lease_months
-                   from v_properties where id = $1 and status = 'approved'`,
-                [propertyId]
-            );
-            if (property.length === 0) throw notFound('Property');
-
-            const {rows: taken} = await client.query(
-                "select id from bookings where property_id = $1 and status in ('confirmed', 'active')",
-                [propertyId]
-            );
-            if (taken.length > 0) throw invalid('This property is already let');
-
-            const p = property[0];
-            const rent = Number(p.price);
-            if (!Number.isFinite(rent) || rent <= 0) {
-                throw invalid('This property has no price set, so it cannot be booked yet');
-            }
-            const depositMonths = Number(p.deposit_months ?? 0);
-            const advanceMonths = Number(p.advance_rent_months ?? 0);
-            const leaseMonths = resolveLeaseMonths(input.leaseMonths, p.min_lease_months);
-
-            const deposit = round2(rent * depositMonths);
-            const advance = round2(rent * advanceMonths);
-            // What must be settled before the keys change hands: the deposit
-            // plus whatever rent is payable up front.
-            const totalDue = round2(deposit + (advance > 0 ? advance : rent));
-
-            const {rows} = await client.query(
-                `insert into bookings
-                     (property_id, customer_id, inquiry_id, viewing_id, monthly_rent, currency,
-                      deposit_amount, advance_months, payment_frequency, lease_months,
-                      move_in_date, total_due, notes, expires_at)
-                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9::rent_payment_frequency, $10,
-                         $11::date, $12, $13, now() + interval '48 hours')
-                 returning id`,
-                [
-                    propertyId,
-                    customerId,
-                    nullIfBlank(input.inquiryId),
-                    nullIfBlank(input.viewingId),
-                    rent,
-                    p.currency ?? 'TZS',
-                    deposit,
-                    advanceMonths,
-                    p.payment_frequency ?? 'monthly',
-                    leaseMonths,
-                    nullIfBlank(input.moveInDate),
-                    totalDue,
-                    nullIfBlank(input.notes),
-                ]
-            );
-            const bookingId = rows[0].id;
-
-            // The payment the customer will settle. It opens pending with no
-            // instructions — an operator supplies those, and the app shows the
-            // booking as "awaiting instructions" until they do.
-            await client.query(
-                `insert into payments (booking_id, property_id, payer_user_id, purpose, amount, currency, created_by)
-                 values ($1, $2, $3, 'deposit', $4, $5, $6)`,
-                [bookingId, propertyId, customerId, totalDue, p.currency ?? 'TZS', customerId]
-            );
-
-            await client.query("update bookings set status = 'awaiting_payment' where id = $1", [bookingId]);
-            return bookingId;
-        }).then((id) => getBooking(customerId, id));
-    }
-
-    async function cancelBooking(customerId, id, reason) {
-        const why = nullIfBlank(reason);
-        if (!why) throw invalid('Please say why you are cancelling');
-
-        return withActor(pool, customerId, async (client) => {
-            const {rows} = await client.query(
-                `update bookings set status = 'cancelled', cancellation_reason = $3
-                  where id = $1 and customer_id = $2
-                  returning id`,
-                [id, customerId, why]
-            );
-            if (rows.length === 0) throw notFound('Booking');
-            return id;
-        }).then(() => getBooking(customerId, id));
     }
 
     // --- payments ------------------------------------------------------------
@@ -673,14 +458,6 @@ export function createCustomerAppService({pool}) {
         getInquiry,
         createInquiry,
         withdrawInquiry,
-        listViewings,
-        getViewing,
-        requestViewing,
-        cancelViewing,
-        listBookings,
-        getBooking,
-        createBooking,
-        cancelBooking,
         listPayments,
         getPayment,
         declarePaid,
@@ -692,10 +469,6 @@ export function createCustomerAppService({pool}) {
         markAllNotificationsRead,
         activitySummary,
     };
-}
-
-function round2(value) {
-    return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
 function numberOrNull(value) {

@@ -80,14 +80,14 @@ HomeMate Africa mobile app and the service behind it.</p>
 <table>
   <tr><th>Data</th><th>Why</th></tr>
   <tr><td>Phone number</td><td>It is your account. We send a one-time SMS code to prove it is yours.</td></tr>
-  <tr><td>Name</td><td>So a landlord or agent knows who is asking to view a home.</td></tr>
+  <tr><td>Name</td><td>So a landlord or agent knows who is enquiring about a home.</td></tr>
   <tr><td>Email address (optional)</td><td>Receipts and account notices, if you give one.</td></tr>
-  <tr><td>Profile photo (optional)</td><td>Shown on your profile and to the agent you are meeting.</td></tr>
+  <tr><td>Profile photo (optional)</td><td>Shown on your profile and to the landlord or agent handling your enquiry.</td></tr>
   <tr><td>PIN</td><td>Stored only as a one-way hash. We cannot read your PIN, and it is never sent to anyone else.</td></tr>
-  <tr><td>Saved homes, enquiries, viewings and bookings</td><td>To run the service — to show your shortlist, deliver your enquiry, and hold your appointment.</td></tr>
+  <tr><td>Saved homes, enquiries and reservations</td><td>To run the service — to show your shortlist, deliver your enquiry, and hold the home while you pay.</td></tr>
   <tr><td>Payment records</td><td>Rent and fees are paid by mobile money, card or bank transfer. We record the amount, reference and status so you and the landlord have the same receipt.</td></tr>
   <tr><td>Language preference</td><td>To show the app in English or Kiswahili.</td></tr>
-  <tr><td>Notification token</td><td>To send you updates about your enquiries, viewings and payments.</td></tr>
+  <tr><td>Notification token</td><td>To send you updates about your enquiries and payments.</td></tr>
   <tr><td>IP address and device/browser identifier at sign-in</td><td>Security only. Every SMS costs money, so we use these to detect and block abuse of the code-sending endpoint.</td></tr>
 </table>
 
@@ -171,7 +171,7 @@ account. We complete requests within 30 days.</p>
 <h2>What gets deleted</h2>
 <ul>
   <li>Your name, email address, profile photo and PIN.</li>
-  <li>Your saved homes, enquiries and viewing requests.</li>
+  <li>Your saved homes and enquiries.</li>
   <li>Your notification token, so we stop contacting you.</li>
 </ul>
 
@@ -208,8 +208,8 @@ By using the app you agree to them.</p>
 
 <h2>What HomeMate is</h2>
 <p>HomeMate is a platform that connects people looking for a home with
-landlords and agents who have one to let. We list properties, arrange
-viewings, and pass payments to the landlord or agent. <strong>We are not the
+landlords and agents who have one to let. We list properties, pass your
+enquiries to the landlord or agent, and pass payments on to them. <strong>We are not the
 landlord.</strong> The tenancy agreement is between you and them.</p>
 
 <h2>Your account</h2>
@@ -228,7 +228,7 @@ before committing money to it.</p>
 <h2>Payments</h2>
 <ul>
   <li>Payments are made through mobile money and are subject to your provider's own terms and fees.</li>
-  <li>A booking or viewing fee is shown before you pay it. Refund terms for each payment are shown at the time of payment.</li>
+  <li>Your first payment includes the HomeMate fee — a set share of one month's rent, charged instead of the usual month's agent fee. It is shown on the listing and itemised before you pay. Refund terms for each payment are shown at the time of payment.</li>
   <li>Never pay a landlord or agent outside the app. We can only help with a payment we have a record of.</li>
 </ul>
 

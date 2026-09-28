@@ -230,16 +230,24 @@ describe('journey: rent collection and disbursement (e2e)', () => {
             body: {userId: broker.id, role: 'broker', commissionPercentage: 5, isPrimary: true},
         });
 
-        // --- 5. Rent is collected ----------------------------------------------
+        // --- 5. The first payment is collected ----------------------------------
+        // A month's rent plus the tenant fee (half a month). The fee is where
+        // every commission comes from: HomeMate keeps 10% of it and the broker
+        // who listed the home gets the rest; the rent is the landlord's whole.
         const payment = await api('/admin/payments', {
             method: 'POST',
             body: {
                 propertyId: property.id,
                 payerUserId: tenant.id,
-                amount: 1200000,
+                amount: 1800000,
                 purpose: 'rent',
                 periodStart: '2026-10-01',
                 periodEnd: '2026-10-31',
+                splits: [
+                    {beneficiaryType: 'platform', amount: 60000, percentage: 10},
+                    {beneficiaryType: 'broker', beneficiaryUserId: broker.id, amount: 540000, percentage: 90},
+                    {beneficiaryType: 'landlord', beneficiaryUserId: landlord.id, amount: 1200000},
+                ],
             },
         });
         assert.equal(payment.status, 201, JSON.stringify(payment.body));
@@ -250,10 +258,10 @@ describe('journey: rent collection and disbursement (e2e)', () => {
         const shares = Object.fromEntries(
             payment.body.splits.map((s) => [s.beneficiary_type, Number(s.amount)])
         );
-        assert.equal(shares.platform, 120000); // 10%
-        assert.equal(shares.broker, 60000); //  5%
-        assert.equal(shares.landlord, 1020000); // the rest
-        assert.equal(shares.platform + shares.broker + shares.landlord, 1200000);
+        assert.equal(shares.platform, 60000); // 10% of the fee
+        assert.equal(shares.broker, 540000); // the rest of the fee
+        assert.equal(shares.landlord, 1200000); // the rent, whole
+        assert.equal(shares.platform + shares.broker + shares.landlord, 1800000);
 
         // Nothing is owed while the money has not actually arrived.
         assert.deepEqual((await api('/admin/money/outstanding')).body.items, []);
@@ -274,16 +282,16 @@ describe('journey: rent collection and disbursement (e2e)', () => {
         const ledgerAfterCollection = Object.fromEntries(
             settled.body.ledger.map((e) => [e.account, Number(e.amount)])
         );
-        assert.equal(ledgerAfterCollection['cash.collections'], 1200000);
-        assert.equal(ledgerAfterCollection['revenue.commission'], 120000);
+        assert.equal(ledgerAfterCollection['cash.collections'], 1800000);
+        assert.equal(ledgerAfterCollection['revenue.commission'], 60000);
 
         // --- 7. Everyone is now owed their share --------------------------------
         const outstanding = await api('/admin/money/outstanding');
         const owed = Object.fromEntries(
             outstanding.body.items.map((row) => [row.beneficiary_type, Number(row.amount_due)])
         );
-        assert.equal(owed.landlord, 1020000);
-        assert.equal(owed.broker, 60000);
+        assert.equal(owed.landlord, 1200000);
+        assert.equal(owed.broker, 540000);
 
         // --- 8. Disbursement -----------------------------------------------------
         const landlordPayout = await api('/admin/payouts', {
@@ -291,7 +299,7 @@ describe('journey: rent collection and disbursement (e2e)', () => {
             body: {beneficiaryType: 'landlord', beneficiaryUserId: landlord.id},
         });
         assert.equal(landlordPayout.status, 201, JSON.stringify(landlordPayout.body));
-        assert.equal(Number(landlordPayout.body.amount), 1020000);
+        assert.equal(Number(landlordPayout.body.amount), 1200000);
         assert.equal(landlordPayout.body.status, 'scheduled');
         assert.match(landlordPayout.body.reference, /^HM-PO-\d{6}$/);
 
@@ -334,9 +342,9 @@ describe('journey: rent collection and disbursement (e2e)', () => {
 
         // --- 9. The books balance -------------------------------------------------
         const summary = await api('/admin/money/summary');
-        assert.equal(Number(summary.body.collected), 1200000);
-        assert.equal(Number(summary.body.disbursed), 1080000);
-        assert.equal(Number(summary.body.platform_revenue), 120000);
+        assert.equal(Number(summary.body.collected), 1800000);
+        assert.equal(Number(summary.body.disbursed), 1740000);
+        assert.equal(Number(summary.body.platform_revenue), 60000);
         assert.equal(Number(summary.body.owed), 0);
 
         // HomeMate connects the parties and keeps only its commission: what came
@@ -417,8 +425,6 @@ describe('journey: rent collection and disbursement (e2e)', () => {
             staff: 0,
             payments: 0,
             inquiries: 0,
-            viewings: 0,
-            bookings: 0,
         });
 
         const landlord = await createUser({

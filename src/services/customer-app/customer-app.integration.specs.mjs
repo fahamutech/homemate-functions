@@ -2,14 +2,15 @@ import {test, describe, before, after, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import {createCustomerAppService} from './service.mjs';
+import {createCustomerJourneyService} from './journey.mjs';
 import {createMoneyService} from '../admin-console/money.mjs';
 import {ErrorCodes} from '../../shared/errors.mjs';
 
 /**
  * What a customer does, against the real database — because the rules being
- * tested are the database's: one open enquiry per property, a viewing that
- * cannot be in the past, a booking that cannot be confirmed before its money
- * arrives, and a payment that a customer's word alone cannot settle.
+ * tested are the database's: one open enquiry per property, nothing to pay
+ * until the landlord accepts, a reservation that cannot be confirmed before
+ * its money arrives, and a payment that a customer's word alone cannot settle.
  */
 
 function expectDomainError(code) {
@@ -23,6 +24,7 @@ describe('customer app (Postgres integration)', () => {
     /** @type {pg.Pool} */
     let pool;
     let app;
+    let journey;
     let money;
     let dictionaryIds;
     let landlord;
@@ -33,6 +35,7 @@ describe('customer app (Postgres integration)', () => {
     before(async () => {
         pool = new pg.Pool({connectionString: process.env.DATABASE_URL});
         app = createCustomerAppService({pool});
+        journey = createCustomerJourneyService({pool});
         money = createMoneyService({pool});
         const {rows} = await pool.query(
             `select code, id from dictionary_items where code in ('apartment', 'dar_es_salaam', 'kinondoni', 'masaki')`
@@ -48,6 +51,7 @@ describe('customer app (Postgres integration)', () => {
         await pool.query(`truncate table
             notifications, customer_preferences, saved_properties, payment_instructions,
             ledger_entries, payment_splits, external_payment_events, payouts, payments,
+            lease_agreements, property_holds,
             bookings, property_viewings, property_inquiries,
             kyc_remediations, kyc_documents, property_parties, property_media, properties,
             users, organizations
@@ -58,6 +62,10 @@ describe('customer app (Postgres integration)', () => {
         customer = await makeUser('+255700001002', 'Neema Customer', 'customer');
         other = await makeUser('+255700001003', 'Juma Other', 'customer');
         propertyId = await makeProperty();
+        await pool.query(
+            `update settings set value = '50'::jsonb where key = 'commission.tenant_fee_percentage';
+             update settings set value = '10'::jsonb where key = 'commission.platform_percentage';`
+        );
     });
 
     async function makeUser(phone, name, role) {
@@ -164,6 +172,12 @@ describe('customer app (Postgres integration)', () => {
             assert.equal(detail.amenities.length, 2);
             assert.equal(detail.isSaved, true);
             assert.equal(detail.contact.landlordName, 'Baraka Landlord');
+            // Shown before anyone enquires: half a month at 800,000, and the
+            // other half kept against the usual month's agent fee.
+            assert.deepEqual(
+                {amount: detail.serviceFee.amount, saving: detail.serviceFee.saving},
+                {amount: 400_000, saving: 400_000}
+            );
         });
 
         test('a property still in moderation is not reachable by direct id', async () => {
@@ -288,158 +302,65 @@ describe('customer app (Postgres integration)', () => {
         });
     });
 
-    // --- viewings ------------------------------------------------------------
-
-    describe('viewings', () => {
-        const soon = () => new Date(Date.now() + 2 * 86400_000).toISOString();
-
-        test('books a viewing and is given the host to meet', async () => {
-            const viewing = await app.requestViewing(customer, {
-                propertyId,
-                scheduledFor: soon(),
-                meetingPoint: 'Main gate',
-                note: 'I will come with my brother',
-            });
-
-            assert.match(viewing.reference, /^HM-VW-\d{6}$/);
-            assert.equal(viewing.status, 'requested');
-            assert.equal(viewing.host_name, 'Baraka Landlord');
-            assert.equal(viewing.is_upcoming, true);
-            // The map screen needs coordinates with the appointment.
-            assert.ok(Math.abs(viewing.property_latitude + 6.7576) < 0.001);
-        });
-
-        test('refuses a time that has already passed', async () => {
-            await assert.rejects(
-                app.requestViewing(customer, {
-                    propertyId,
-                    scheduledFor: new Date(Date.now() - 86400_000).toISOString(),
-                }),
-                expectDomainError(ErrorCodes.VALIDATION_FAILED)
-            );
-        });
-
-        test('needs a date', async () => {
-            await assert.rejects(
-                app.requestViewing(customer, {propertyId}),
-                expectDomainError(ErrorCodes.VALIDATION_FAILED)
-            );
-        });
-
-        test('an omitted duration means the usual half hour, not zero minutes', async () => {
-            // The app sends `durationMinutes: null` for "I did not choose one".
-            // Coercing that with Number() gave 0, which the table's
-            // duration_sane check rejected — every booking from the phone came
-            // back as a constraint name.
-            const viewing = await app.requestViewing(customer, {
-                propertyId,
-                scheduledFor: soon(),
-                durationMinutes: null,
-            });
-            assert.equal(viewing.duration_minutes, 30);
-        });
-
-        test('a duration outside what the table allows is refused in words', async () => {
-            for (const durationMinutes of [0, 5, 600]) {
-                await assert.rejects(
-                    app.requestViewing(customer, {propertyId, scheduledFor: soon(), durationMinutes}),
-                    (error) => {
-                        assert.equal(error.code, ErrorCodes.VALIDATION_FAILED);
-                        // A sentence a customer could act on, not a constraint name.
-                        assert.doesNotMatch(error.message, /constraint/i);
-                        return true;
-                    }
-                );
-            }
-        });
-
-        test('a duration the table allows is kept', async () => {
-            const viewing = await app.requestViewing(customer, {
-                propertyId,
-                scheduledFor: soon(),
-                durationMinutes: 45,
-            });
-            assert.equal(viewing.duration_minutes, 45);
-        });
-
-        test('cancelling needs a reason and records it', async () => {
-            const viewing = await app.requestViewing(customer, {propertyId, scheduledFor: soon()});
-
-            await assert.rejects(
-                app.cancelViewing(customer, viewing.id, '  '),
-                expectDomainError(ErrorCodes.VALIDATION_FAILED)
-            );
-
-            const cancelled = await app.cancelViewing(customer, viewing.id, 'Found somewhere else');
-            assert.equal(cancelled.status, 'cancelled');
-            assert.equal(cancelled.cancellation_reason, 'Found somewhere else');
-        });
-
-        test('a confirmed viewing cannot jump straight to completed', async () => {
-            const viewing = await app.requestViewing(customer, {propertyId, scheduledFor: soon()});
-
-            await assert.rejects(
-                pool.query("update property_viewings set status = 'completed' where id = $1", [viewing.id]),
-                /Illegal viewing status transition/
-            );
-        });
-
-        test('only upcoming ones when the app asks for upcoming', async () => {
-            await app.requestViewing(customer, {propertyId, scheduledFor: soon()});
-
-            const upcoming = await app.listViewings(customer, {upcomingOnly: true});
-            assert.equal(upcoming.items.length, 1);
-        });
-
-        test('a customer cannot cancel someone else’s viewing', async () => {
-            const viewing = await app.requestViewing(customer, {propertyId, scheduledFor: soon()});
-            await assert.rejects(
-                app.cancelViewing(other, viewing.id, 'Not mine'),
-                expectDomainError(ErrorCodes.NOT_FOUND)
-            );
-        });
-    });
-
     // --- bookings and payment ------------------------------------------------
 
-    describe('booking and paying', () => {
-        test('booking copies the terms and raises the payment to settle', async () => {
-            const booking = await app.createBooking(customer, {propertyId, moveInDate: '2026-11-01'});
+    describe('paying for an accepted enquiry', () => {
+        /** Enquire, be accepted, and start paying — the only road there is. */
+        async function reserve(who = customer) {
+            const inquiry = await app.createInquiry(who, {propertyId, message: 'Is it still free?'});
+            await pool.query("update property_inquiries set status = 'accepted' where id = $1", [inquiry.id]);
+            const checkout = await journey.startCheckout(who, propertyId, {moveInDate: '2026-11-01'});
+            const payment = await app.getPayment(who, checkout.paymentId);
+            return {...checkout, payment};
+        }
+
+        async function bookingRow(id) {
+            const {rows} = await pool.query('select * from v_bookings where id = $1', [id]);
+            return rows[0];
+        }
+
+        test('checkout copies the terms, adds the HomeMate fee, and raises the payment', async () => {
+            const {bookingId, payment} = await reserve();
+            const booking = await bookingRow(bookingId);
 
             assert.match(booking.reference, /^HM-BK-\d{6}$/);
             assert.equal(booking.status, 'awaiting_payment');
             assert.equal(Number(booking.monthly_rent), 800000);
-            // deposit is 2 months, and with no advance the first month is due
+            // deposit is 2 months; with no advance the first month is due; and
+            // the fee is half a month
             assert.equal(Number(booking.deposit_amount), 1600000);
-            assert.equal(Number(booking.total_due), 2400000);
-            assert.equal(Number(booking.amount_outstanding), 2400000);
-            assert.equal(booking.payments.length, 1);
-            assert.equal(booking.payments[0].customer_state, 'awaiting_instructions');
+            assert.equal(Number(booking.service_fee), 400000);
+            assert.equal(Number(booking.total_due), 2800000);
+            assert.equal(Number(booking.amount_outstanding), 2800000);
+            assert.equal(payment.customer_state, 'awaiting_instructions');
         });
 
         test('a later price change does not rewrite what was agreed', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
+            const {bookingId} = await reserve();
             await pool.query('update properties set price = 1200000 where id = $1', [propertyId]);
 
-            const fresh = await app.getBooking(customer, booking.id);
+            const fresh = await bookingRow(bookingId);
             assert.equal(Number(fresh.monthly_rent), 800000);
-            assert.equal(Number(fresh.total_due), 2400000);
+            assert.equal(Number(fresh.total_due), 2800000);
         });
 
-        test('will not book a property that is already let', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
-            await settle(booking);
-            await pool.query("update bookings set status = 'confirmed' where id = $1", [booking.id]);
+        test('will not start paying for a property that is already let', async () => {
+            const {payment} = await reserve();
+            await settle(payment.id);
+            await pool.query('update property_holds set released_at = now() where released_at is null');
 
+            const inquiry = await app.createInquiry(other, {propertyId, message: 'Still free?'}).catch(() => null);
+            if (inquiry) {
+                await pool.query("update property_inquiries set status = 'accepted' where id = $1", [inquiry.id]);
+            }
             await assert.rejects(
-                app.createBooking(other, {propertyId}),
-                (error) => /already let/.test(error.message)
+                journey.startCheckout(other, propertyId),
+                (error) => /no longer available|cannot be/.test(error.message)
             );
         });
 
         test('the app is told to wait until an operator supplies the payment details', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
-            const payment = booking.payments[0];
+            const {payment} = await reserve();
 
             await assert.rejects(
                 app.declarePaid(customer, payment.id, {reference: 'MPESA-1'}),
@@ -448,10 +369,10 @@ describe('customer app (Postgres integration)', () => {
         });
 
         test('shows the payment details an operator configured, verbatim', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
-            await giveInstructions(booking.payments[0].id);
+            const {payment: raised} = await reserve();
+            await giveInstructions(raised.id);
 
-            const payment = await app.getPayment(customer, booking.payments[0].id);
+            const payment = await app.getPayment(customer, raised.id);
             assert.equal(payment.customer_state, 'awaiting_payment');
             assert.equal(payment.pay_to_account_number, '5566778');
             assert.equal(payment.pay_reference, 'HM-BK-REF');
@@ -460,10 +381,10 @@ describe('customer app (Postgres integration)', () => {
         });
 
         test('declaring payment records a claim and settles nothing', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
-            await giveInstructions(booking.payments[0].id);
+            const {bookingId, payment} = await reserve();
+            await giveInstructions(payment.id);
 
-            const declared = await app.declarePaid(customer, booking.payments[0].id, {
+            const declared = await app.declarePaid(customer, payment.id, {
                 reference: 'MPESA-CONF-77',
                 note: 'Paid at 10am',
             });
@@ -472,71 +393,55 @@ describe('customer app (Postgres integration)', () => {
             assert.equal(declared.status, 'pending', 'a claim must never settle a payment');
             assert.equal(declared.customer_declared_reference, 'MPESA-CONF-77');
 
-            const fresh = await app.getBooking(customer, booking.id);
+            const fresh = await bookingRow(bookingId);
             assert.equal(Number(fresh.amount_paid), 0);
-            assert.equal(Number(fresh.amount_awaiting_verification), 2400000);
+            assert.equal(Number(fresh.amount_awaiting_verification), 2800000);
         });
 
-        test('a booking cannot be confirmed on the customer’s word alone', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
-            await giveInstructions(booking.payments[0].id);
-            await app.declarePaid(customer, booking.payments[0].id, {reference: 'MPESA-1'});
+        test('a reservation cannot be confirmed on the customer’s word alone', async () => {
+            const {bookingId, payment} = await reserve();
+            await giveInstructions(payment.id);
+            await app.declarePaid(customer, payment.id, {reference: 'MPESA-1'});
 
             await assert.rejects(
-                pool.query("update bookings set status = 'confirmed' where id = $1", [booking.id]),
+                pool.query("update bookings set status = 'confirmed' where id = $1", [bookingId]),
                 /cannot be confirmed yet/
             );
         });
 
-        test('once finance verifies it, the booking may be confirmed', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
-            await giveInstructions(booking.payments[0].id);
-            await app.declarePaid(customer, booking.payments[0].id, {reference: 'MPESA-1'});
+        test('verifying the payment confirms the reservation by itself', async () => {
+            const {bookingId, payment} = await reserve();
+            await giveInstructions(payment.id);
+            await app.declarePaid(customer, payment.id, {reference: 'MPESA-1'});
 
-            await money.reconcilePayment(booking.payments[0].id, {note: 'Seen on the statement'}, 'finance@homemate.co.tz');
-            await pool.query("update bookings set status = 'confirmed' where id = $1", [booking.id]);
+            await money.reconcilePayment(payment.id, {note: 'Seen on the statement'}, 'finance@homemate.co.tz');
 
-            const fresh = await app.getBooking(customer, booking.id);
+            const fresh = await bookingRow(bookingId);
             assert.equal(fresh.status, 'confirmed');
-            assert.equal(Number(fresh.amount_paid), 2400000);
+            assert.equal(Number(fresh.amount_paid), 2800000);
             assert.equal(Number(fresh.amount_outstanding), 0);
-            assert.equal(fresh.payments[0].customer_state, 'paid');
+            assert.equal((await app.getPayment(customer, payment.id)).customer_state, 'paid');
         });
 
         test('a payment already settled cannot be declared again', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
-            await settle(booking);
+            const {payment} = await reserve();
+            await settle(payment.id);
 
             await assert.rejects(
-                app.declarePaid(customer, booking.payments[0].id, {}),
+                app.declarePaid(customer, payment.id, {}),
                 (error) => /already been confirmed/.test(error.message)
             );
         });
 
         test('a customer cannot see or act on another customer’s payment', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
-            await giveInstructions(booking.payments[0].id);
+            const {payment} = await reserve();
+            await giveInstructions(payment.id);
 
-            await assert.rejects(app.getBooking(other, booking.id), expectDomainError(ErrorCodes.NOT_FOUND));
+            await assert.rejects(app.getPayment(other, payment.id), expectDomainError(ErrorCodes.NOT_FOUND));
             await assert.rejects(
-                app.getPayment(other, booking.payments[0].id),
+                app.declarePaid(other, payment.id, {}),
                 expectDomainError(ErrorCodes.NOT_FOUND)
             );
-            await assert.rejects(
-                app.declarePaid(other, booking.payments[0].id, {}),
-                expectDomainError(ErrorCodes.NOT_FOUND)
-            );
-        });
-
-        test('cancelling a booking needs a reason', async () => {
-            const booking = await app.createBooking(customer, {propertyId});
-
-            await assert.rejects(
-                app.cancelBooking(customer, booking.id, ''),
-                expectDomainError(ErrorCodes.VALIDATION_FAILED)
-            );
-            const cancelled = await app.cancelBooking(customer, booking.id, 'Changed my mind');
-            assert.equal(cancelled.status, 'cancelled');
         });
 
         async function giveInstructions(paymentId) {
@@ -549,9 +454,9 @@ describe('customer app (Postgres integration)', () => {
             );
         }
 
-        async function settle(booking) {
-            await giveInstructions(booking.payments[0].id);
-            await money.reconcilePayment(booking.payments[0].id, {}, 'finance@homemate.co.tz');
+        async function settle(paymentId) {
+            await giveInstructions(paymentId);
+            await money.reconcilePayment(paymentId, {}, 'finance@homemate.co.tz');
         }
     });
 
@@ -653,17 +558,13 @@ describe('customer app (Postgres integration)', () => {
         test('summarises what the customer has in flight', async () => {
             await app.saveProperty(customer, propertyId);
             await app.createInquiry(customer, {propertyId, message: 'Asking'});
-            await app.requestViewing(customer, {
-                propertyId,
-                scheduledFor: new Date(Date.now() + 86400_000).toISOString(),
-            });
             await pool.query(`insert into notifications (user_id, title) values ($1, 'Hello')`, [customer]);
 
             const summary = await app.activitySummary(customer);
 
             assert.equal(summary.savedCount, 1);
             assert.equal(summary.openInquiries, 1);
-            assert.equal(summary.upcomingViewings, 1);
+            assert.equal(summary.upcomingViewings, undefined, 'viewings are gone from the journey');
             assert.equal(summary.unreadNotifications, 1);
             assert.equal(summary.activeBookings, 0);
         });

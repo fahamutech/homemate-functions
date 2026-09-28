@@ -57,7 +57,7 @@ describe('customer journey (Postgres integration)', () => {
             notifications, customer_preferences, saved_properties, payment_instructions,
             ledger_entries, payment_splits, external_payment_events, payouts, payments,
             lease_agreements, property_holds,
-            bookings, property_viewings, property_inquiries,
+            bookings, property_viewings, property_inquiries, settings_history,
             kyc_remediations, kyc_documents, property_parties, property_media, properties,
             users, organizations
             restart identity cascade`);
@@ -67,7 +67,25 @@ describe('customer journey (Postgres integration)', () => {
         customer = await makeUser('+255700002002', 'Neema Customer', 'customer');
         other = await makeUser('+255700002003', 'Juma Other', 'customer');
         propertyId = await makeProperty();
+        await pool.query(
+            `update settings set value = '50'::jsonb where key = 'commission.tenant_fee_percentage';
+             update settings set value = '10'::jsonb where key = 'commission.platform_percentage';`
+        );
     });
+
+    /**
+     * The only road to paying: the customer enquires and the landlord accepts.
+     */
+    async function accepted(who = customer, property = propertyId) {
+        const inquiry = await app.createInquiry(who, {propertyId: property, message: 'Is it still free?'});
+        await pool.query("update property_inquiries set status = 'accepted' where id = $1", [inquiry.id]);
+        return inquiry;
+    }
+
+    async function checkoutFor(who = customer, input = {}, property = propertyId) {
+        await accepted(who, property);
+        return journey.startCheckout(who, property, input);
+    }
 
     async function makeUser(phone, name, role) {
         const {rows} = await pool.query(
@@ -214,46 +232,39 @@ describe('customer journey (Postgres integration)', () => {
         });
     });
 
-    // --- the three routes into payment ---------------------------------------
+    // --- the one route into payment ---------------------------------------
 
     describe('who may pay, and by which route', () => {
-        test('someone who has never asked may still pay outright', async () => {
+        test('someone who has not enquired is told to enquire first', async () => {
             const eligibility = await journey.checkoutEligibility(customer, propertyId);
 
-            assert.equal(eligibility.canPay, true);
-            assert.equal(eligibility.route, 'direct');
+            assert.equal(eligibility.canPay, false);
+            assert.equal(eligibility.route, 'no_inquiry');
+            await assert.rejects(
+                () => journey.startCheckout(customer, propertyId),
+                (error) => {
+                    assert.equal(error.code, ErrorCodes.VALIDATION_FAILED);
+                    assert.match(error.message, /enquiry first/i);
+                    return true;
+                }
+            );
         });
 
-        test('an accepted enquiry is recognised as the route in', async () => {
-            const inquiry = await app.createInquiry(customer, {
-                propertyId,
-                message: 'Is this still free?',
-            });
-            await pool.query("update property_inquiries set status = 'accepted' where id = $1", [
-                inquiry.id,
-            ]);
+        test('an enquiry still with the landlord is not yet a way in', async () => {
+            await app.createInquiry(customer, {propertyId, message: 'Is this still free?'});
+
+            const eligibility = await journey.checkoutEligibility(customer, propertyId);
+            assert.equal(eligibility.canPay, false);
+            assert.equal(eligibility.route, 'inquiry_pending');
+        });
+
+        test('an accepted enquiry is the route in', async () => {
+            const inquiry = await accepted();
 
             const eligibility = await journey.checkoutEligibility(customer, propertyId);
             assert.equal(eligibility.route, 'inquiry_accepted');
             assert.equal(eligibility.inquiryId, inquiry.id);
             assert.equal(eligibility.canPay, true);
-        });
-
-        test('a completed viewing is a route in even with no enquiry behind it', async () => {
-            const viewing = await app.requestViewing(customer, {
-                propertyId,
-                scheduledFor: new Date(Date.now() + 86_400_000).toISOString(),
-            });
-            await pool.query("update property_viewings set status = 'confirmed' where id = $1", [
-                viewing.id,
-            ]);
-            await pool.query("update property_viewings set status = 'completed' where id = $1", [
-                viewing.id,
-            ]);
-
-            const eligibility = await journey.checkoutEligibility(customer, propertyId);
-            assert.equal(eligibility.route, 'viewing_completed');
-            assert.equal(eligibility.viewingId, viewing.id);
         });
 
         test('a declined enquiry closes the door', async () => {
@@ -287,16 +298,17 @@ describe('customer journey (Postgres integration)', () => {
 
     describe('starting a checkout', () => {
         test('creates the booking, the payment and the hold together', async () => {
-            const checkout = await journey.startCheckout(customer, propertyId, {leaseMonths: 12});
+            const checkout = await checkoutFor(customer, {leaseMonths: 12});
 
             assert.ok(checkout.bookingId);
             assert.ok(checkout.paymentId);
             assert.equal(checkout.hold.property_id, propertyId);
             assert.ok(checkout.hold.is_live);
 
-            // deposit is 2 months at 800,000, plus the first month's rent
-            assert.equal(checkout.summary.totalDue, 2_400_000);
-            assert.equal(checkout.summary.amountOutstanding, 2_400_000);
+            // deposit is 2 months at 800,000, the first month's rent, and the
+            // HomeMate fee of half a month
+            assert.equal(checkout.summary.totalDue, 2_800_000);
+            assert.equal(checkout.summary.amountOutstanding, 2_800_000);
 
             const {rows} = await pool.query('select status from bookings where id = $1', [
                 checkout.bookingId,
@@ -308,10 +320,7 @@ describe('customer journey (Postgres integration)', () => {
             // The mobile client sends `leaseMonths: null` for a field nobody
             // touched. That used to become 0 and violate bookings_lease_sane,
             // so checkout answered 422 for a perfectly ordinary booking.
-            const checkout = await journey.startCheckout(customer, propertyId, {
-                leaseMonths: null,
-                moveInDate: null,
-            });
+            const checkout = await checkoutFor(customer, {leaseMonths: null, moveInDate: null});
 
             const {rows} = await pool.query('select lease_months from bookings where id = $1', [
                 checkout.bookingId,
@@ -320,7 +329,8 @@ describe('customer journey (Postgres integration)', () => {
         });
 
         test('the hold it takes blocks a second customer from starting one', async () => {
-            await journey.startCheckout(customer, propertyId);
+            await checkoutFor(customer);
+            await accepted(other);
 
             await assert.rejects(
                 () => journey.startCheckout(other, propertyId),
@@ -329,7 +339,7 @@ describe('customer journey (Postgres integration)', () => {
         });
 
         test('re-entering reuses the booking rather than stacking a second one', async () => {
-            const first = await journey.startCheckout(customer, propertyId);
+            const first = await checkoutFor(customer);
             const again = await journey.startCheckout(customer, propertyId);
 
             assert.equal(again.bookingId, first.bookingId);
@@ -342,11 +352,8 @@ describe('customer journey (Postgres integration)', () => {
             assert.equal(rows[0].bookings, 1);
         });
 
-        test('records which door the customer came through', async () => {
-            const inquiry = await app.createInquiry(customer, {propertyId, message: 'Interested'});
-            await pool.query("update property_inquiries set status = 'accepted' where id = $1", [
-                inquiry.id,
-            ]);
+        test('records the enquiry the landlord accepted', async () => {
+            const inquiry = await accepted();
 
             const checkout = await journey.startCheckout(customer, propertyId);
             const {rows} = await pool.query('select inquiry_id from bookings where id = $1', [
@@ -356,15 +363,114 @@ describe('customer journey (Postgres integration)', () => {
         });
 
         test('the breakdown accounts for every shilling of the total', async () => {
-            const checkout = await journey.startCheckout(customer, propertyId);
+            const checkout = await checkoutFor();
 
             const summed = checkout.summary.breakdown.reduce((total, line) => total + line.amount, 0);
             assert.equal(summed, checkout.summary.totalDue);
             assert.ok(checkout.summary.breakdown.some((line) => line.key === 'deposit'));
-            assert.ok(
-                checkout.summary.breakdown.some((line) => line.waived),
-                'waived charges must still be listed, because "TZS 0" is information'
+        });
+
+        test('shows the HomeMate fee and what it saves against a month’s agent fee', async () => {
+            const checkout = await checkoutFor();
+
+            const fee = checkout.summary.breakdown.find((line) => line.key === 'service_fee');
+            assert.equal(fee.amount, 400_000, 'half of one month at 800,000');
+            assert.equal(fee.highlight, true);
+            assert.deepEqual(
+                {
+                    amount: checkout.summary.serviceFee.amount,
+                    benchmark: checkout.summary.serviceFee.benchmarkAmount,
+                    saving: checkout.summary.serviceFee.saving,
+                },
+                {amount: 400_000, benchmark: 800_000, saving: 400_000}
             );
+        });
+
+        test('snapshots the fee so a later change of setting does not rewrite it', async () => {
+            const checkout = await checkoutFor();
+            await pool.query(
+                "update settings set value = '80'::jsonb where key = 'commission.tenant_fee_percentage'"
+            );
+
+            const again = await journey.startCheckout(customer, propertyId);
+            assert.equal(again.summary.serviceFee.amount, 400_000);
+            assert.equal(again.summary.totalDue, checkout.summary.totalDue);
+        });
+
+        test('splits the payment: HomeMate from the fee, the landlord everything else', async () => {
+            const checkout = await checkoutFor();
+
+            const {rows} = await pool.query(
+                `select beneficiary_type::text as type, amount::numeric::float8 as amount
+                   from payment_splits where payment_id = $1 order by beneficiary_type`,
+                [checkout.paymentId]
+            );
+            assert.deepEqual(rows, [
+                {type: 'landlord', amount: 2_760_000},
+                {type: 'platform', amount: 40_000},
+            ]);
+        });
+
+        test('a broker who listed it takes the rest of the fee, and nothing from the rent', async () => {
+            const broker = await makeUser('+255700002004', 'Asha Broker', 'broker');
+            await pool.query(
+                `insert into property_parties (property_id, user_id, role, is_primary, commission_percentage)
+                 values ($1, $2, 'broker', true, 5)`,
+                [propertyId, broker]
+            );
+            const checkout = await checkoutFor();
+
+            const {rows} = await pool.query(
+                `select beneficiary_type::text as type, amount::numeric::float8 as amount
+                   from payment_splits where payment_id = $1 order by beneficiary_type`,
+                [checkout.paymentId]
+            );
+            assert.deepEqual(rows, [
+                {type: 'landlord', amount: 2_400_000},
+                {type: 'broker', amount: 360_000},
+                {type: 'platform', amount: 40_000},
+            ]);
+        });
+
+        test('settling posts HomeMate’s share of the fee as commission revenue', async () => {
+            const checkout = await checkoutFor();
+            await journey.payNow(customer, checkout.paymentId, {paymentMethodId: await activeMethodId()});
+            await money.reconcilePayment(checkout.paymentId, {note: 'Paid'}, 'finance@homemate.co.tz');
+
+            const {rows} = await pool.query(
+                `select coalesce(sum(amount), 0)::float8 as revenue
+                   from ledger_entries where account = 'revenue.commission' and payment_id = $1`,
+                [checkout.paymentId]
+            );
+            assert.equal(rows[0].revenue, 40_000);
+        });
+
+        test('the finance portal’s commission report shows the fee and who it belongs to', async () => {
+            const broker = await makeUser('+255700002005', 'Asha Broker', 'broker');
+            await pool.query(
+                `insert into property_parties (property_id, user_id, role, is_primary) values ($1, $2, 'broker', true)`,
+                [propertyId, broker]
+            );
+            const checkout = await checkoutFor();
+
+            let report = await money.commissions();
+            assert.equal(report.items.length, 1);
+            const row = report.items[0];
+            assert.equal(row.id, checkout.bookingId);
+            assert.equal(Number(row.service_fee), 400_000);
+            assert.equal(Number(row.platform_fee), 40_000);
+            assert.equal(Number(row.agent_fee), 360_000);
+            assert.equal(row.agent_name, 'Asha Broker');
+            assert.equal(row.settled, false, 'earned on paper until the payment is verified');
+            assert.equal(Number(report.totals.platform), 40_000);
+            assert.equal(Number(report.totals.platform_settled), 0);
+
+            await journey.payNow(customer, checkout.paymentId, {paymentMethodId: await activeMethodId()});
+            await money.reconcilePayment(checkout.paymentId, {note: 'Paid'}, 'finance@homemate.co.tz');
+
+            report = await money.commissions({settled: 'true'});
+            assert.equal(report.items.length, 1);
+            assert.equal(Number(report.totals.platform_settled), 40_000);
         });
     });
 
@@ -372,7 +478,7 @@ describe('customer journey (Postgres integration)', () => {
 
     describe('paying', () => {
         test('opens a charge, returns instructions, and settles nothing', async () => {
-            const checkout = await journey.startCheckout(customer, propertyId);
+            const checkout = await checkoutFor();
             const methodId = await activeMethodId();
 
             const result = await journey.payNow(customer, checkout.paymentId, {
@@ -391,7 +497,7 @@ describe('customer journey (Postgres integration)', () => {
         });
 
         test('keeps the provider’s reply verbatim as an external entity', async () => {
-            const checkout = await journey.startCheckout(customer, propertyId);
+            const checkout = await checkoutFor();
             await journey.payNow(customer, checkout.paymentId, {
                 paymentMethodId: await activeMethodId(),
             });
@@ -406,7 +512,7 @@ describe('customer journey (Postgres integration)', () => {
         });
 
         test('refuses a method nobody has registered an adapter for', async () => {
-            const checkout = await journey.startCheckout(customer, propertyId);
+            const checkout = await checkoutFor();
             // payment_methods is reference data and survives the truncate, so
             // this has to be idempotent across runs.
             const {rows} = await pool.query(
@@ -424,7 +530,7 @@ describe('customer journey (Postgres integration)', () => {
         });
 
         test('a payment belongs to its payer', async () => {
-            const checkout = await journey.startCheckout(customer, propertyId);
+            const checkout = await checkoutFor();
             const methodId = await activeMethodId();
 
             await assert.rejects(
@@ -527,14 +633,9 @@ describe('customer journey (Postgres integration)', () => {
     });
 
     describe('the Favourites screen payload', () => {
-        test('carries all four sections with their own totals', async () => {
+        test('carries its three sections with their own totals', async () => {
             await app.saveProperty(customer, propertyId);
             await app.createInquiry(customer, {propertyId, message: 'Interested'});
-            const second = await makeProperty();
-            await app.requestViewing(customer, {
-                propertyId: second,
-                scheduledFor: new Date(Date.now() + 86_400_000).toISOString(),
-            });
 
             const overview = await journey.savedOverview(customer);
 
@@ -542,9 +643,8 @@ describe('customer journey (Postgres integration)', () => {
             assert.equal(overview.favorites.length, 1);
             assert.equal(overview.inquiryCount, 1);
             assert.equal(overview.recentInquiries.length, 1);
-            assert.equal(overview.upcomingBookingCount, 1);
-            assert.equal(overview.upcomingBookings.length, 1);
             assert.deepEqual(overview.activeRentals, []);
+            assert.equal(overview.upcomingBookings, undefined, 'viewings are no longer part of the journey');
         });
 
         test('shows an accepted enquiry as awaiting payment, which is what the chip says', async () => {
@@ -561,19 +661,23 @@ describe('customer journey (Postgres integration)', () => {
             // The bug this covers: nothing ever ended 'awaiting_payment', so a
             // customer with an active rent in the section above was still being
             // told by this row that they owed for it.
-            const inquiry = await app.createInquiry(customer, {propertyId, message: 'Interested'});
-            await pool.query("update property_inquiries set status = 'accepted' where id = $1", [
-                inquiry.id,
-            ]);
-
-            const checkout = await journey.startCheckout(customer, propertyId, {leaseMonths: 12});
+            const checkout = await checkoutFor(customer, {leaseMonths: 12});
             await journey.payNow(customer, checkout.paymentId, {
                 paymentMethodId: await activeMethodId(),
             });
+            await app.declarePaid(customer, checkout.paymentId, {reference: 'QJ12KL9MN'});
+
+            let overview = await journey.savedOverview(customer);
+            assert.equal(overview.recentInquiries[0].display_status, 'awaiting_verification');
+
             await money.reconcilePayment(checkout.paymentId, {note: 'Paid'}, 'finance@homemate.co.tz');
 
-            const overview = await journey.savedOverview(customer);
-            assert.equal(overview.recentInquiries[0].display_status, 'booked');
+            overview = await journey.savedOverview(customer);
+            assert.equal(overview.recentInquiries[0].display_status, 'paid');
+
+            // The Activity tab lists enquiries, so the list carries it too.
+            const {items} = await app.listInquiries(customer);
+            assert.equal(items[0].display_status, 'paid');
         });
 
         test('sees only its own customer’s records', async () => {
@@ -600,7 +704,7 @@ describe('customer journey (Postgres integration)', () => {
          * notice window opens" need a lease with some of it behind them.
          */
         async function makeTenancy() {
-            const checkout = await journey.startCheckout(customer, propertyId, {leaseMonths: 12});
+            const checkout = await checkoutFor(customer, {leaseMonths: 12});
             await journey.payNow(customer, checkout.paymentId, {
                 paymentMethodId: await activeMethodId(),
             });
@@ -624,7 +728,7 @@ describe('customer journey (Postgres integration)', () => {
             // `awaiting_payment`, so a customer who had paid still saw
             // "pending" in Activity and got no Active Rent in Favourites until
             // an operator moved the booking by hand.
-            const checkout = await journey.startCheckout(customer, propertyId, {leaseMonths: 12});
+            const checkout = await checkoutFor(customer, {leaseMonths: 12});
             await journey.payNow(customer, checkout.paymentId, {
                 paymentMethodId: await activeMethodId(),
             });
@@ -657,7 +761,7 @@ describe('customer journey (Postgres integration)', () => {
         });
 
         test('a part payment is progress, not a tenancy', async () => {
-            const checkout = await journey.startCheckout(customer, propertyId, {leaseMonths: 12});
+            const checkout = await checkoutFor(customer, {leaseMonths: 12});
             await journey.payNow(customer, checkout.paymentId, {
                 paymentMethodId: await activeMethodId(),
             });
@@ -718,6 +822,7 @@ describe('customer journey (Postgres integration)', () => {
         test('once someone has the tenancy, nobody else may start paying for it', async () => {
             await makeTenancy();
             await pool.query('update property_holds set released_at = now() where released_at is null');
+            await accepted(other);
 
             await assert.rejects(
                 () => journey.startCheckout(other, propertyId),

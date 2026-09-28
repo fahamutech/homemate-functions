@@ -3,14 +3,22 @@ import {notFound, invalid} from '../../shared/errors.mjs';
 
 /**
  * The operator's side of everything the app does: answering enquiries,
- * confirming viewings, moving bookings along, and — the part that carries real
+ * looking after the tenancies they turn into, and — the part that carries real
  * money — publishing where a customer should pay and then verifying that they
  * did.
+ *
+ * There is no booking workflow for an operator to drive any more. A customer
+ * enquires, the enquiry is accepted here, the customer pays, and verifying the
+ * payment confirms the reservation by itself (021). What is left for a person
+ * is the tenancy afterwards: starting it and ending it.
  *
  * The verification itself is not here. It is `money.reconcilePayment`, because
  * a customer payment settles by exactly the same authorised path as any other
  * (BR-005). This module's job is to put the right thing in front of a person.
  */
+/** confirmed → active, active → completed; the database enforces the order. */
+const TENANCY_MOVES = ['active', 'completed'];
+
 export function createCustomerOpsService({pool}) {
     // --- inquiries -----------------------------------------------------------
 
@@ -74,62 +82,10 @@ export function createCustomerOpsService({pool}) {
         }).then(() => getInquiry(id));
     }
 
-    // --- viewings ------------------------------------------------------------
-
-    async function listViewings(filters = {}) {
-        const {limit, offset} = pageParams(filters);
-        const {rows} = await query(pool, 'select * from search_viewings($1, $2, $3, $4, $5, $6, $7)', [
-            nullIfBlank(filters.query),
-            nullIfBlank(filters.status),
-            nullIfBlank(filters.customerId),
-            nullIfBlank(filters.propertyId),
-            filters.upcomingOnly === true || filters.upcomingOnly === 'true',
-            limit,
-            offset,
-        ]);
-        return toPage(rows, {limit, offset});
-    }
-
-    async function getViewing(id) {
-        const {rows} = await query(pool, 'select * from v_viewings where id = $1', [id]);
-        if (rows.length === 0) throw notFound('Viewing');
-        return rows[0];
-    }
-
-    async function changeViewingStatus(id, {status, reason, hostNote, meetingPoint}, actor) {
-        const next = nullIfBlank(status);
-        if (!next) throw invalid('status is required');
-        if (next === 'cancelled' && !nullIfBlank(reason)) {
-            throw invalid('Tell the customer why the viewing was cancelled');
-        }
-
-        return withActor(pool, actor, async (client) => {
-            const {rows} = await client.query(
-                `update property_viewings
-                    set status = $2::viewing_status,
-                        cancellation_reason = case when $2 = 'cancelled' then $3 else null end,
-                        host_note = coalesce($4, host_note),
-                        meeting_point = coalesce($5, meeting_point)
-                  where id = $1
-                  returning id, customer_id, reference, scheduled_for`,
-                [id, next, nullIfBlank(reason), nullIfBlank(hostNote), nullIfBlank(meetingPoint)]
-            );
-            if (rows.length === 0) throw notFound('Viewing');
-
-            if (next === 'confirmed' || next === 'cancelled') {
-                await notify(client, rows[0].customer_id, {
-                    kind: 'viewing_confirmed',
-                    title: next === 'confirmed' ? 'Your viewing is confirmed' : 'Your viewing was cancelled',
-                    body: next === 'cancelled' ? reason : null,
-                    subjectTable: 'property_viewings',
-                    subjectId: id,
-                });
-            }
-            return id;
-        }).then(() => getViewing(id));
-    }
-
-    // --- bookings ------------------------------------------------------------
+    // --- rentals -------------------------------------------------------------
+    //
+    // Still stored as `bookings`: the reservation a payment settles against and
+    // the tenancy it becomes are one row.
 
     async function listBookings(filters = {}) {
         const {limit, offset} = pageParams(filters);
@@ -156,32 +112,33 @@ export function createCustomerOpsService({pool}) {
     }
 
     /**
-     * Moving a booking along. Confirming is refused by the database until the
-     * money is actually settled, so this does not re-check it — it simply lets
-     * that refusal reach the operator with its own explanation.
+     * Starting or ending a tenancy — the only moves left to a person.
+     * Confirming happens when the payment is verified, and an unpaid
+     * reservation lapses on its own, so neither is offered here.
      */
-    async function changeBookingStatus(id, {status, reason}, actor) {
+    async function changeBookingStatus(id, {status}, actor) {
         const next = nullIfBlank(status);
         if (!next) throw invalid('status is required');
-        if (next === 'cancelled' && !nullIfBlank(reason)) {
-            throw invalid('Give a reason for cancelling this booking');
+        if (!TENANCY_MOVES.includes(next)) {
+            throw invalid(
+                'Only starting or ending a tenancy is done by hand. A reservation is confirmed when its payment is verified.'
+            );
         }
 
         return withActor(pool, actor, async (client) => {
             const {rows} = await client.query(
                 `update bookings
-                    set status = $2::booking_status,
-                        cancellation_reason = case when $2 = 'cancelled' then $3 else null end
+                    set status = $2::booking_status
                   where id = $1
                   returning id, customer_id, reference`,
-                [id, next, nullIfBlank(reason)]
+                [id, next]
             );
             if (rows.length === 0) throw notFound('Booking');
 
             await notify(client, rows[0].customer_id, {
                 kind: 'booking_update',
-                title: `Your booking ${rows[0].reference} is now ${next.replace(/_/g, ' ')}`,
-                body: next === 'cancelled' ? reason : null,
+                title: next === 'active' ? 'Your tenancy has started' : 'Your tenancy has ended',
+                body: null,
                 subjectTable: 'bookings',
                 subjectId: id,
             });
@@ -338,9 +295,6 @@ export function createCustomerOpsService({pool}) {
         listInquiries,
         getInquiry,
         respondToInquiry,
-        listViewings,
-        getViewing,
-        changeViewingStatus,
         listBookings,
         getBooking,
         changeBookingStatus,

@@ -26,6 +26,13 @@ export const adminPaymentSummary = route({
     handler: () => adminConsole.money.summary(),
 });
 
+export const adminListCommissions = route({
+    method: 'get',
+    path: '/admin/money/commissions',
+    description: 'Listing commissions: each tenant fee, HomeMate’s share and the agent’s share',
+    handler: (request) => adminConsole.money.commissions(request.query),
+});
+
 export const adminGetPayment = route({
     method: 'get',
     path: '/admin/payments/:id',
