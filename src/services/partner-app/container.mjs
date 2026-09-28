@@ -8,6 +8,7 @@ import {createLandlordConfirmationsService} from './confirmations.mjs';
 import {createPropertiesService} from '../admin-console/properties.mjs';
 import {storagePort} from '../storage/container.mjs';
 import {createPartnerEnquiriesService} from './enquiries.mjs';
+import {createPartnerMoneyService} from './money.mjs';
 import {createLandlordTenanciesService} from './tenancies.mjs';
 import {createCustomerOpsService} from '../admin-console/customer-ops.mjs';
 
@@ -41,3 +42,6 @@ export const landlordConfirmations = createLandlordConfirmationsService({pool});
 const customerOps = createCustomerOpsService({pool});
 export const partnerEnquiries = createPartnerEnquiriesService({pool, customerOps});
 export const landlordTenancies = createLandlordTenanciesService({pool, customerOps});
+
+/** Earnings, payouts and home summaries (T06) — read-only views of the backoffice's money. */
+export const partnerMoney = createPartnerMoneyService({pool});

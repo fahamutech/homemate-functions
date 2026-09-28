@@ -141,3 +141,7 @@ export function requirePartnerWorkspace({path}) {
 export const requirePartnerListingsWorkspace = requirePartnerWorkspace({path: '/app/partner/listings'});
 export const requirePartnerLandlordsWorkspace = requirePartnerWorkspace({path: '/app/partner/landlords'});
 export const requirePartnerInquiriesWorkspace = requirePartnerWorkspace({path: '/app/partner/inquiries'});
+
+// The two partner home screens (T06) need the role active and in use.
+export const requireBrokerForSummary = requirePartnerRole('broker', {path: '/app/broker/summary'});
+export const requireLandlordForSummary = requirePartnerRole('landlord', {path: '/app/landlord/summary'});
