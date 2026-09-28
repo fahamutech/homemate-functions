@@ -102,7 +102,7 @@ export const customerResetPin = route({
 export const customerMe = route({
     method: 'get',
     path: '/app/me',
-    description: 'The signed-in customer',
+    description: 'The signed-in customer, with every role they hold and the one last used',
     handler: (request) => customerAccess.me({userId: request.auth.userId}),
 });
 
@@ -119,6 +119,16 @@ export const customerCompleteProfile = route({
     },
     handler: (request) =>
         customerAccess.completeProfile({userId: request.auth.userId, ...(request.body ?? {})}),
+});
+
+export const customerSwitchActiveRole = route({
+    method: 'post',
+    path: '/app/me/active-role',
+    description: 'Act as another of your active roles without signing in again; returns a re-signed token',
+    requestSample: {role: 'broker'},
+    responseSample: {token: '…', activeRole: 'broker', roles: ['customer', 'broker']},
+    handler: (request) =>
+        customerAccess.switchActiveRole({userId: request.auth.userId, role: request.body?.role}),
 });
 
 export const customerChangePin = route({

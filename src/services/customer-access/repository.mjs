@@ -1,4 +1,5 @@
 import {query, withActor} from '../../shared/db.mjs';
+import {readUserRoles} from '../../shared/roles.mjs';
 
 /**
  * Every statement customer-access needs, and nothing else. `service.mjs` takes
@@ -230,6 +231,22 @@ export function createCustomerAccessRepository({pool}) {
         });
     }
 
+    /** Every `user_roles` row for the account (migration 027). */
+    async function findUserRoles(userId) {
+        return readUserRoles(pool, userId);
+    }
+
+    /** Remembers the role the app should open in next time. */
+    async function setLastActiveRole(userId, role) {
+        return withActor(pool, userId, async (client) => {
+            const {rows} = await client.query(
+                'update users set last_active_role = $2::user_role where id = $1 returning *',
+                [userId, role]
+            );
+            return rows[0];
+        });
+    }
+
     return {
         otpSettings,
         checkOtpQuota,
@@ -246,6 +263,8 @@ export function createCustomerAccessRepository({pool}) {
         registerPinFailure,
         clearPinFailures,
         completeOnboarding,
+        findUserRoles,
+        setLastActiveRole,
         publicUser,
     };
 }

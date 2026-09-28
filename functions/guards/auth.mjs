@@ -1,6 +1,8 @@
 import {getSharedSessionTokens} from '../../src/shared/session-tokens.mjs';
-import {STAFF_ROLES} from '../../src/shared/roles.mjs';
+import {STAFF_ROLES, readRoleStatus} from '../../src/shared/roles.mjs';
 import {resourceKeysForPath} from '../../src/shared/admin-acl.mjs';
+import {createPartnerRoleGuard} from '../../src/shared/partner-role-guard.mjs';
+import {getPool} from '../../src/db/pool.mjs';
 
 const created = new Date().toISOString();
 
@@ -103,3 +105,22 @@ export const requireCustomerForApp = createSessionGuard(
     'Requires a customer session for every mobile app API route',
     {requiredRole: 'customer'}
 );
+
+/**
+ * Builds the guard for a broker or landlord workspace (T01): the session must
+ * be acting as `role`, and `user_roles` must still say that role is active —
+ * a suspension takes effect on the next request. Exported as a factory, so
+ * bfast mounts nothing until a route file (T03–T06) exports
+ * `requirePartnerRole('broker', {path: '/app/broker'})`.
+ *
+ * @param {'broker'|'landlord'} role
+ * @param {{path?: string}} [options] the prefix to guard; defaults to `/app/<role>`
+ */
+export function requirePartnerRole(role, {path} = {}) {
+    return createPartnerRoleGuard({
+        role,
+        path,
+        verify: (token) => getSharedSessionTokens().verify(token),
+        roleStatusOf: (userId, askedRole) => readRoleStatus(getPool(), userId, askedRole),
+    });
+}

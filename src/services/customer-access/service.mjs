@@ -2,6 +2,8 @@ import {randomInt, createHash, randomBytes, timingSafeEqual} from 'node:crypto';
 import {scrypt as scryptCallback} from 'node:crypto';
 import {promisify} from 'node:util';
 import {DomainError, ErrorCodes} from '../../shared/errors.mjs';
+import {ACCOUNT_ROLES} from '../../shared/roles.mjs';
+import {activeRolesOf, customerSessionClaims, publicRole} from '../../shared/active-role.mjs';
 
 const scrypt = promisify(scryptCallback);
 
@@ -293,13 +295,7 @@ export function createCustomerAccessService({
             throw error;
         }
 
-        if (user.status === 'suspended' || user.status === 'deactivated') {
-            throw new DomainError(
-                ErrorCodes.FORBIDDEN,
-                'This account is not active. Please contact support.',
-                403
-            );
-        }
+        assertAccountUsable(user);
 
         if (!(await pinMatches(pin, user.pin_hash))) {
             const {locked, lockedUntil} = await repository.registerPinFailure(user.id);
@@ -338,10 +334,45 @@ export function createCustomerAccessService({
         return issueSession(user);
     }
 
+    /** The profile, plus every role the account holds and the one last used. */
     async function me({userId}) {
         const user = await repository.findUserById(userId);
         if (!user) throw new DomainError(ErrorCodes.NOT_FOUND, 'Account not found', 404);
-        return repository.publicUser(user);
+        const roleRows = await repository.findUserRoles(userId);
+        return {
+            ...repository.publicUser(user),
+            roles: roleRows.map(publicRole),
+            lastActiveRole: user.last_active_role ?? null,
+        };
+    }
+
+    /**
+     * ROL-002: act as another of your roles without signing in again. Only an
+     * `active` role can be switched to; the choice is remembered so the next
+     * sign-in opens in the same place, and a re-signed token is returned
+     * because the partner guards read `activeRole` from it.
+     */
+    async function switchActiveRole({userId, role}) {
+        if (typeof role !== 'string' || !ACCOUNT_ROLES.includes(role)) {
+            throw new DomainError(
+                ErrorCodes.VALIDATION_FAILED,
+                `role must be one of: ${ACCOUNT_ROLES.join(', ')}`,
+                400
+            );
+        }
+
+        const user = await repository.findUserById(userId);
+        if (!user) throw new DomainError(ErrorCodes.NOT_FOUND, 'Account not found', 404);
+        assertAccountUsable(user);
+
+        const roleRows = await repository.findUserRoles(userId);
+        if (!activeRolesOf(roleRows).includes(role)) {
+            throw new DomainError(ErrorCodes.ROLE_NOT_ACTIVE, `Your ${role} role is not active`, 403);
+        }
+
+        const updated = await repository.setLastActiveRole(userId, role);
+        const claims = customerSessionClaims(updated, roleRows);
+        return {token: sessionTokens.sign(claims), activeRole: claims.activeRole, roles: claims.roles};
     }
 
     /**
@@ -400,11 +431,24 @@ export function createCustomerAccessService({
         }
     }
 
-    function issueSession(user) {
+    function assertAccountUsable(user) {
+        if (user.status === 'suspended' || user.status === 'deactivated') {
+            throw new DomainError(
+                ErrorCodes.FORBIDDEN,
+                'This account is not active. Please contact support.',
+                403
+            );
+        }
+    }
+
+    async function issueSession(user) {
+        const claims = customerSessionClaims(user, await repository.findUserRoles(user.id));
         return {
-            token: sessionTokens.sign({userId: user.id, phoneNumber: user.phone_number, role: 'customer'}),
+            token: sessionTokens.sign(claims),
             user: repository.publicUser(user),
             onboardingComplete: Boolean(user.onboarding_completed_at),
+            roles: claims.roles,
+            activeRole: claims.activeRole,
         };
     }
 
@@ -416,6 +460,7 @@ export function createCustomerAccessService({
         changePin,
         resetPin,
         me,
+        switchActiveRole,
         completeProfile,
     };
 }

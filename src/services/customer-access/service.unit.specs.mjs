@@ -23,6 +23,8 @@ function makeRepository(overrides = {}) {
         logged: [],
         deliveries: [],
         sequence: 0,
+        // user_roles, keyed by user id: what migration 027 keeps per person.
+        roles: new Map(),
     };
 
     const repository = {
@@ -84,9 +86,13 @@ function makeRepository(overrides = {}) {
                     pin_failed_attempts: 0,
                     pin_locked_until: null,
                     onboarding_completed_at: null,
+                    last_active_role: null,
                     created_at: new Date(),
                 };
                 state.users.set(user.id, user);
+                // The database trigger in 027 gives every new platform user
+                // an active customer role; the fake does the same.
+                state.roles.set(user.id, [{role: 'customer', status: 'active'}]);
             }
             user.phone_verified_at = new Date();
             return user;
@@ -124,6 +130,14 @@ function makeRepository(overrides = {}) {
                 preferred_language: patch.preferredLanguage,
                 onboarding_completed_at: new Date(),
             });
+            return user;
+        },
+        async findUserRoles(userId) {
+            return state.roles.get(userId) ?? [];
+        },
+        async setLastActiveRole(userId, role) {
+            const user = state.users.get(userId);
+            user.last_active_role = role;
             return user;
         },
         ...overrides,
@@ -562,5 +576,161 @@ describe('customer access', () => {
             assert.equal(shape.pinHash, undefined);
             assert.equal(shape.hasPin, true, 'the app still needs to know a PIN exists');
         }
+    });
+});
+
+describe('one account, many roles (T01)', () => {
+    async function signedUp({roles = [], lastActiveRole = null} = {}) {
+        const built = build();
+        const verificationToken = await verifiedToken(built.service);
+        const {user} = await built.service.setPin({verificationToken, pin: '4820'});
+        const stored = built.repository.state.users.get(user.id);
+        stored.last_active_role = lastActiveRole;
+        built.repository.state.roles.set(user.id, [{role: 'customer', status: 'active'}, ...roles]);
+        return {...built, userId: user.id};
+    }
+
+    describe('the session token', () => {
+        test('a plain customer signs in as customer, with role kept for the current app', async () => {
+            const {service, sessionTokens, userId} = await signedUp();
+
+            const {token} = await service.loginWithPin({phoneNumber: PHONE, pin: '4820'});
+            const claims = sessionTokens.verify(token);
+
+            assert.equal(claims.userId, userId);
+            assert.equal(claims.phoneNumber, PHONE);
+            assert.equal(claims.role, 'customer');
+            assert.deepEqual(claims.roles, ['customer']);
+            assert.equal(claims.activeRole, 'customer');
+        });
+
+        test('a broker who last worked as a broker opens as a broker', async () => {
+            const {service, sessionTokens} = await signedUp({
+                roles: [{role: 'broker', status: 'active'}],
+                lastActiveRole: 'broker',
+            });
+
+            const {token, activeRole, roles} = await service.loginWithPin({phoneNumber: PHONE, pin: '4820'});
+            const claims = sessionTokens.verify(token);
+
+            assert.deepEqual(claims.roles, ['customer', 'broker']);
+            assert.equal(claims.activeRole, 'broker');
+            assert.equal(activeRole, 'broker', 'the app reads the role to open without decoding the token');
+            assert.deepEqual(roles, ['customer', 'broker']);
+        });
+
+        test('a broker whose role was suspended since last time opens as a customer', async () => {
+            const {service, sessionTokens} = await signedUp({
+                roles: [{role: 'broker', status: 'suspended'}],
+                lastActiveRole: 'broker',
+            });
+
+            const {token} = await service.loginWithPin({phoneNumber: PHONE, pin: '4820'});
+            const claims = sessionTokens.verify(token);
+
+            assert.deepEqual(claims.roles, ['customer']);
+            assert.equal(claims.activeRole, 'customer');
+        });
+    });
+
+    describe('/app/me', () => {
+        test('lists every role with its status, and the last role used', async () => {
+            const {service, userId} = await signedUp({
+                roles: [
+                    {role: 'broker', status: 'active', activated_at: new Date('2026-09-01T00:00:00Z')},
+                    {role: 'landlord', status: 'rejected', rejection_reason: 'Title deed unreadable'},
+                ],
+                lastActiveRole: 'broker',
+            });
+
+            const me = await service.me({userId});
+
+            assert.equal(me.lastActiveRole, 'broker');
+            assert.deepEqual(
+                me.roles.map((r) => [r.role, r.status]),
+                [['customer', 'active'], ['broker', 'active'], ['landlord', 'rejected']]
+            );
+            assert.equal(me.roles[2].rejectionReason, 'Title deed unreadable');
+            assert.equal(me.hasPin, true, 'the existing profile fields are still there');
+        });
+    });
+
+    describe('switching role', () => {
+        test('switches to an active role, remembers it and returns a re-signed token', async () => {
+            const {service, sessionTokens, repository, userId} = await signedUp({
+                roles: [{role: 'landlord', status: 'active'}],
+            });
+
+            const result = await service.switchActiveRole({userId, role: 'landlord'});
+            const claims = sessionTokens.verify(result.token);
+
+            assert.equal(result.activeRole, 'landlord');
+            assert.equal(claims.activeRole, 'landlord');
+            assert.deepEqual(claims.roles, ['customer', 'landlord']);
+            assert.equal(claims.role, 'customer');
+            assert.equal(repository.state.users.get(userId).last_active_role, 'landlord');
+        });
+
+        test('switching back to customer is always allowed', async () => {
+            const {service, userId, sessionTokens} = await signedUp({
+                roles: [{role: 'broker', status: 'active'}],
+                lastActiveRole: 'broker',
+            });
+
+            const result = await service.switchActiveRole({userId, role: 'customer'});
+
+            assert.equal(sessionTokens.verify(result.token).activeRole, 'customer');
+        });
+
+        for (const status of ['invited', 'applied', 'pending_review', 'action_needed', 'rejected', 'suspended']) {
+            test(`a ${status} role is refused with ROLE_NOT_ACTIVE and nothing is remembered`, async () => {
+                const extra = status === 'rejected' ? {rejection_reason: 'No'} : {};
+                const {service, repository, userId} = await signedUp({
+                    roles: [{role: 'broker', status, ...extra}],
+                });
+
+                await assert.rejects(
+                    service.switchActiveRole({userId, role: 'broker'}),
+                    (error) => error.code === 'ROLE_NOT_ACTIVE' && error.status === 403
+                );
+                assert.equal(repository.state.users.get(userId).last_active_role, null);
+            });
+        }
+
+        test('a role the person never had is refused the same way', async () => {
+            const {service, userId} = await signedUp();
+            await assert.rejects(
+                service.switchActiveRole({userId, role: 'landlord'}),
+                (error) => error.code === 'ROLE_NOT_ACTIVE' && error.status === 403
+            );
+        });
+
+        test('something that is not a platform role is a validation error, not a 403', async () => {
+            const {service, userId} = await signedUp();
+            for (const bad of ['admin', 'agency', 'moderator', '', undefined, 42]) {
+                await assert.rejects(
+                    service.switchActiveRole({userId, role: bad}),
+                    (error) => error.code === 'VALIDATION_FAILED' && error.status === 400
+                );
+            }
+        });
+
+        test('a suspended account cannot mint itself a fresh token by switching', async () => {
+            const {service, repository, userId} = await signedUp({roles: [{role: 'broker', status: 'active'}]});
+            repository.state.users.get(userId).status = 'suspended';
+
+            await assert.rejects(
+                service.switchActiveRole({userId, role: 'broker'}),
+                (error) => error.code === 'FORBIDDEN' && error.status === 403
+            );
+        });
+
+        test('an account that no longer exists is not found', async () => {
+            const {service} = await signedUp();
+            await assert.rejects(
+                service.switchActiveRole({userId: 'nobody', role: 'customer'}),
+                (error) => error.code === 'NOT_FOUND'
+            );
+        });
     });
 });
