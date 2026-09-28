@@ -64,6 +64,127 @@ function smallintOrUndefined(value, field = 'value') {
 }
 
 /**
+ * Inserts a property from the API's camelCase body, inside the caller's
+ * transaction. Shared by the backoffice (create below) and the partner app
+ * (src/services/partner-app/listings.mjs), so both write listings the same way.
+ *
+ * @returns {Promise<string>} the new property's id
+ */
+export async function insertProperty(client, input) {
+    const title = nullIfBlank(input.title);
+    if (!title) throw invalid('title is required');
+
+    const latitude = numberOrUndefined(input.latitude);
+    const longitude = numberOrUndefined(input.longitude);
+    if ((latitude === undefined) !== (longitude === undefined)) {
+        throw invalid('latitude and longitude must be provided together');
+    }
+
+    const {rows} = await client.query(
+        `insert into properties (
+             title, description, property_type_id, listing_type, owner_id, organization_id,
+             price, currency, bedrooms, bathrooms, size_sqm, address_line,
+             region_id, district_id, ward_id, location, status
+         ) values (
+             $1, $2, $3, coalesce($4::listing_type, 'rent'), $5, $6,
+             $7, coalesce($8, 'TZS'), $9, $10, $11, $12,
+             $13, $14, $15,
+             case when $16::double precision is not null
+                  then st_setsrid(st_makepoint($17::double precision, $16::double precision), 4326)::geography
+             end,
+             coalesce($18::property_status, 'draft')
+         )
+         returning id`,
+        [
+            title,
+            nullIfBlank(input.description),
+            nullIfBlank(input.propertyTypeId),
+            nullIfBlank(input.listingType),
+            nullIfBlank(input.ownerId),
+            nullIfBlank(input.organizationId),
+            numberOrUndefined(input.price) ?? null,
+            nullIfBlank(input.currency),
+            smallintOrUndefined(input.bedrooms, 'bedrooms') ?? null,
+            smallintOrUndefined(input.bathrooms, 'bathrooms') ?? null,
+            numberOrUndefined(input.sizeSqm) ?? null,
+            nullIfBlank(input.addressLine),
+            nullIfBlank(input.regionId),
+            nullIfBlank(input.districtId),
+            nullIfBlank(input.wardId),
+            latitude ?? null,
+            longitude ?? null,
+            nullIfBlank(input.status),
+        ]
+    );
+
+    // The lease/terms block is optional at creation; apply whatever was
+    // supplied through the same mapping patchProperty() uses.
+    const terms = termsColumns(input);
+    if (Object.values(terms).some((value) => value !== undefined)) {
+        await updateById(client, {
+            table: 'properties',
+            id: rows[0].id,
+            allowed: UPDATABLE_FIELDS,
+            returning: 'id',
+            patch: terms,
+        });
+    }
+    return rows[0].id;
+}
+
+/**
+ * Applies a partial camelCase patch to a property inside the caller's
+ * transaction (fields left undefined are untouched).
+ *
+ * @returns {Promise<boolean>} false when no property has that id
+ */
+export async function patchProperty(client, id, patch) {
+    const latitude = numberOrUndefined(patch.latitude);
+    const longitude = numberOrUndefined(patch.longitude);
+    if ((latitude === undefined) !== (longitude === undefined)) {
+        throw invalid('latitude and longitude must be provided together');
+    }
+
+    const updated = await updateById(client, {
+        table: 'properties',
+        id,
+        allowed: UPDATABLE_FIELDS,
+        returning: 'id',
+        patch: {
+            title: nullIfBlank(patch.title) ?? undefined,
+            description: patch.description === undefined ? undefined : nullIfBlank(patch.description),
+            property_type_id:
+                patch.propertyTypeId === undefined ? undefined : nullIfBlank(patch.propertyTypeId),
+            listing_type: nullIfBlank(patch.listingType) ?? undefined,
+            owner_id: patch.ownerId === undefined ? undefined : nullIfBlank(patch.ownerId),
+            organization_id:
+                patch.organizationId === undefined ? undefined : nullIfBlank(patch.organizationId),
+            price: numberOrUndefined(patch.price),
+            currency: nullIfBlank(patch.currency) ?? undefined,
+            bedrooms: smallintOrUndefined(patch.bedrooms, 'bedrooms'),
+            bathrooms: smallintOrUndefined(patch.bathrooms, 'bathrooms'),
+            size_sqm: numberOrUndefined(patch.sizeSqm),
+            address_line: patch.addressLine === undefined ? undefined : nullIfBlank(patch.addressLine),
+            region_id: patch.regionId === undefined ? undefined : nullIfBlank(patch.regionId),
+            district_id: patch.districtId === undefined ? undefined : nullIfBlank(patch.districtId),
+            ward_id: patch.wardId === undefined ? undefined : nullIfBlank(patch.wardId),
+            ...termsColumns(patch),
+        },
+    });
+    if (!updated) return false;
+
+    if (latitude !== undefined && longitude !== undefined) {
+        await client.query(
+            `update properties
+                set location = st_setsrid(st_makepoint($2, $3), 4326)::geography
+              where id = $1`,
+            [id, longitude, latitude]
+        );
+    }
+    return true;
+}
+
+/**
  * Property registry + moderation queue. Search (text, facets and PostGIS
  * radius) is a single SQL function; approval/rejection is a status transition
  * the database validates and stamps.
@@ -145,116 +266,16 @@ export function createPropertiesService({pool}) {
     }
 
     async function create(input, actor) {
-        const title = nullIfBlank(input.title);
-        if (!title) throw invalid('title is required');
-
-        const latitude = numberOrUndefined(input.latitude);
-        const longitude = numberOrUndefined(input.longitude);
-        if ((latitude === undefined) !== (longitude === undefined)) {
-            throw invalid('latitude and longitude must be provided together');
-        }
-
         return withActor(pool, actor, async (client) => {
-            const {rows} = await client.query(
-                `insert into properties (
-                     title, description, property_type_id, listing_type, owner_id, organization_id,
-                     price, currency, bedrooms, bathrooms, size_sqm, address_line,
-                     region_id, district_id, ward_id, location, status
-                 ) values (
-                     $1, $2, $3, coalesce($4::listing_type, 'rent'), $5, $6,
-                     $7, coalesce($8, 'TZS'), $9, $10, $11, $12,
-                     $13, $14, $15,
-                     case when $16::double precision is not null
-                          then st_setsrid(st_makepoint($17::double precision, $16::double precision), 4326)::geography
-                     end,
-                     coalesce($18::property_status, 'draft')
-                 )
-                 returning id`,
-                [
-                    title,
-                    nullIfBlank(input.description),
-                    nullIfBlank(input.propertyTypeId),
-                    nullIfBlank(input.listingType),
-                    nullIfBlank(input.ownerId),
-                    nullIfBlank(input.organizationId),
-                    numberOrUndefined(input.price) ?? null,
-                    nullIfBlank(input.currency),
-                    smallintOrUndefined(input.bedrooms, 'bedrooms') ?? null,
-                    smallintOrUndefined(input.bathrooms, 'bathrooms') ?? null,
-                    numberOrUndefined(input.sizeSqm) ?? null,
-                    nullIfBlank(input.addressLine),
-                    nullIfBlank(input.regionId),
-                    nullIfBlank(input.districtId),
-                    nullIfBlank(input.wardId),
-                    latitude ?? null,
-                    longitude ?? null,
-                    nullIfBlank(input.status),
-                ]
-            );
-
-            // The lease/terms block is optional at creation; apply whatever was
-            // supplied through the same mapping update() uses.
-            const terms = termsColumns(input);
-            if (Object.values(terms).some((value) => value !== undefined)) {
-                await updateById(client, {
-                    table: 'properties',
-                    id: rows[0].id,
-                    allowed: UPDATABLE_FIELDS,
-                    returning: 'id',
-                    patch: terms,
-                });
-            }
-
-            const {rows: created} = await client.query('select * from v_properties where id = $1', [rows[0].id]);
+            const id = await insertProperty(client, input);
+            const {rows: created} = await client.query('select * from v_properties where id = $1', [id]);
             return created[0];
         });
     }
 
     async function update(id, patch, actor) {
-        const latitude = numberOrUndefined(patch.latitude);
-        const longitude = numberOrUndefined(patch.longitude);
-        if ((latitude === undefined) !== (longitude === undefined)) {
-            throw invalid('latitude and longitude must be provided together');
-        }
-
         return withActor(pool, actor, async (client) => {
-            const updated = await updateById(client, {
-                table: 'properties',
-                id,
-                allowed: UPDATABLE_FIELDS,
-                returning: 'id',
-                patch: {
-                    title: nullIfBlank(patch.title) ?? undefined,
-                    description: patch.description === undefined ? undefined : nullIfBlank(patch.description),
-                    property_type_id:
-                        patch.propertyTypeId === undefined ? undefined : nullIfBlank(patch.propertyTypeId),
-                    listing_type: nullIfBlank(patch.listingType) ?? undefined,
-                    owner_id: patch.ownerId === undefined ? undefined : nullIfBlank(patch.ownerId),
-                    organization_id:
-                        patch.organizationId === undefined ? undefined : nullIfBlank(patch.organizationId),
-                    price: numberOrUndefined(patch.price),
-                    currency: nullIfBlank(patch.currency) ?? undefined,
-                    bedrooms: smallintOrUndefined(patch.bedrooms, 'bedrooms'),
-                    bathrooms: smallintOrUndefined(patch.bathrooms, 'bathrooms'),
-                    size_sqm: numberOrUndefined(patch.sizeSqm),
-                    address_line: patch.addressLine === undefined ? undefined : nullIfBlank(patch.addressLine),
-                    region_id: patch.regionId === undefined ? undefined : nullIfBlank(patch.regionId),
-                    district_id: patch.districtId === undefined ? undefined : nullIfBlank(patch.districtId),
-                    ward_id: patch.wardId === undefined ? undefined : nullIfBlank(patch.wardId),
-                    ...termsColumns(patch),
-                },
-            });
-            if (!updated) throw notFound('Property');
-
-            if (latitude !== undefined && longitude !== undefined) {
-                await client.query(
-                    `update properties
-                        set location = st_setsrid(st_makepoint($2, $3), 4326)::geography
-                      where id = $1`,
-                    [id, longitude, latitude]
-                );
-            }
-
+            if (!(await patchProperty(client, id, patch))) throw notFound('Property');
             const {rows} = await client.query('select * from v_properties where id = $1', [id]);
             return rows[0];
         });

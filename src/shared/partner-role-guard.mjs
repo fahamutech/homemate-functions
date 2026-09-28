@@ -65,3 +65,68 @@ export function createPartnerRoleGuard({role, path = `/app/${role}`, verify, rol
         },
     };
 }
+
+/** The statuses in which a partner may work in their workspace (drafts, lists): T03's canDraftListings. */
+export const WORKSPACE_STATUSES = ['applied', 'pending_review', 'action_needed', 'active'];
+
+/**
+ * A guard for the shared partner workspace (`/app/partner/listings`, T04),
+ * which an applicant may use before approval — drafts are allowed from the
+ * first onboarding step, submitting is not (that is checked per action).
+ *
+ * The role is the session's `activeRole` when it is a partner role; an
+ * applicant, whose active role is still customer, names it in the
+ * `X-Partner-Role` header. Either way `user_roles` must hold that role in a
+ * workspace status. The resolved role and its status are attached as
+ * `request.partnerRole` / `request.partnerRoleStatus`.
+ */
+export function createPartnerWorkspaceGuard({path, verify, roleStatusOf, allowedStatuses = WORKSPACE_STATUSES}) {
+    const refuse = (response) =>
+        response
+            .status(403)
+            .json({error: 'ROLE_NOT_ACTIVE', message: 'Switch to your broker or landlord role to continue'});
+
+    return {
+        created,
+        path,
+        description: 'Requires a customer session acting as a broker or landlord in a workspace status',
+        onGuard: async (request, response, next) => {
+            const [scheme, token] = (request.headers?.authorization ?? '').split(' ');
+            if (scheme !== 'Bearer' || !token) {
+                response.status(401).json({error: 'UNAUTHORIZED', message: 'Missing bearer session token'});
+                return;
+            }
+            const payload = verify(token);
+            if (!payload) {
+                response.status(401).json({error: 'UNAUTHORIZED', message: 'Invalid or expired session token'});
+                return;
+            }
+
+            const role = PARTNER_ROLES.includes(payload.activeRole)
+                ? payload.activeRole
+                : `${request.headers?.['x-partner-role'] ?? ''}`.trim();
+            if (!PARTNER_ROLES.includes(role)) {
+                refuse(response);
+                return;
+            }
+
+            let status;
+            try {
+                status = await roleStatusOf(payload.userId, role);
+            } catch (error) {
+                console.error(`partner workspace guard (${role}) failed`, error);
+                response.status(500).json({error: 'INTERNAL_ERROR', message: 'Unexpected server error'});
+                return;
+            }
+            if (!allowedStatuses.includes(status)) {
+                refuse(response);
+                return;
+            }
+
+            request.auth = payload;
+            request.partnerRole = role;
+            request.partnerRoleStatus = status;
+            next();
+        },
+    };
+}
