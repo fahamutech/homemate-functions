@@ -12,12 +12,14 @@ export class DomainError extends Error {
      * @param {string} code
      * @param {string} message
      * @param {number} [status]
+     * @param {Record<string, unknown>} [details] extra fields the client can act on
      */
-    constructor(code, message, status = 400) {
+    constructor(code, message, status = 400, details = undefined) {
         super(message);
         this.name = 'DomainError';
         this.code = code;
         this.status = status;
+        this.details = details;
     }
 }
 

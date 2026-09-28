@@ -19,7 +19,11 @@ import {invalid, notFound} from '../../shared/errors.mjs';
  */
 
 /** What a customer may upload about themselves, and nothing else. */
-const SELF_SERVE_TYPES = ['national_id', 'passport', 'drivers_licence', 'voters_id', 'selfie'];
+const SELF_SERVE_TYPES = [
+    'national_id', 'passport', 'drivers_licence', 'voters_id', 'selfie',
+    // A landlord's proof of ownership (T03, LND-002b) is the person's evidence too.
+    'title_deed', 'utility_bill',
+];
 
 export function createCustomerIdentityService({pool, kyc}) {
     /** The status card the profile screen shows, with each document's outcome. */

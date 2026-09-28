@@ -97,14 +97,25 @@ describe('customer identity (Postgres integration)', () => {
     });
 
     test('refuses a document type that is not the customer’s to file', async () => {
-        // A title deed or a business licence belongs to a property or an
-        // agency, and arrives through the backoffice.
-        for (const documentType of ['title_deed', 'business_licence', 'nonsense']) {
+        // A business licence belongs to an agency and arrives through the
+        // backoffice.
+        for (const documentType of ['business_licence', 'bank_statement', 'nonsense']) {
             await assert.rejects(
                 upload(customer, documentType),
                 expectDomainError(ErrorCodes.VALIDATION_FAILED)
             );
         }
+    });
+
+    test('a landlord applicant files proof of ownership through the same upload (T03)', async () => {
+        for (const documentType of ['title_deed', 'utility_bill']) {
+            const document = await upload(customer, documentType);
+            assert.equal(document.document_type, documentType);
+            assert.equal(document.status, 'pending');
+        }
+        const status = await identity.getIdentity(customer);
+        assert.ok(status.acceptedDocumentTypes.includes('title_deed'));
+        assert.ok(status.acceptedDocumentTypes.includes('utility_bill'));
     });
 
     test('a customer only ever sees their own documents', async () => {

@@ -20,6 +20,12 @@ const TEMPLATES = {
         `Your HomeMate booking ${reference} for ${property} is confirmed.`,
     'payment-received': ({reference, amount, currency}) =>
         `HomeMate received your payment ${reference} of ${currency} ${amount}. Thank you.`,
+    'partner-application-decision': ({decision, role, reason, text}) =>
+        decision === 'approve'
+            ? `HomeMate: your ${role} application is approved. Open the app and switch to your ${role} role.`
+            : decision === 'reject'
+              ? `HomeMate: your ${role} application was not approved. Reason: ${reason}`
+              : `HomeMate: your ${role} application needs a change. ${text ?? ''} Open the app to fix it.`,
 };
 
 /** Provider status group 1/3 is pending, 20/DELIVERY is delivered, else rejected. */

@@ -3,6 +3,7 @@ import {scrypt as scryptCallback} from 'node:crypto';
 import {promisify} from 'node:util';
 import {DomainError, ErrorCodes} from '../../shared/errors.mjs';
 import {ACCOUNT_ROLES} from '../../shared/roles.mjs';
+import {readDateOfBirth} from '../../shared/profile-fields.mjs';
 import {activeRolesOf, customerSessionClaims, publicRole} from '../../shared/active-role.mjs';
 
 const scrypt = promisify(scryptCallback);
@@ -31,20 +32,6 @@ const OBVIOUS_PINS = new Set([
 ]);
 
 const GENDERS = new Set(['female', 'male', 'other', 'undisclosed']);
-
-/** Mirrors users_dob_sane in 009: a birthday cannot be today or later. */
-function readDateOfBirth(value) {
-    if (value === undefined || value === null || `${value}`.trim() === '') return null;
-    const text = `${value}`.trim();
-    const parsed = new Date(`${text}T00:00:00Z`);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(parsed.getTime())) {
-        throw new DomainError(ErrorCodes.VALIDATION_FAILED, 'Give the date of birth as YYYY-MM-DD', 400);
-    }
-    if (parsed >= new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z')) {
-        throw new DomainError(ErrorCodes.VALIDATION_FAILED, 'That date of birth is in the future', 400);
-    }
-    return text;
-}
 
 /** Mirrors users_gender_known in 009. */
 function readGender(value) {

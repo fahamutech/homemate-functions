@@ -34,6 +34,7 @@ const RULES = [
     ['/admin/payouts', ['payments']],
     ['/admin/ledger', ['payments']],
     ['/admin/geocode', ['properties', 'agencies']],
+    ['/admin/partner-applications', ['partners']],
 ];
 
 export function resourceKeysForPath(path) {
