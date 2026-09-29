@@ -19,6 +19,22 @@ import {notFound, invalid} from '../../shared/errors.mjs';
 /** confirmed → active, active → completed; the database enforces the order. */
 const TENANCY_MOVES = ['active', 'completed'];
 
+const HISTORY_LABELS = {
+    pending: 'Reserved',
+    awaiting_payment: 'Awaiting payment',
+    confirmed: 'Payment verified',
+    active: 'Moved in',
+    completed: 'Ended',
+    cancelled: 'Cancelled',
+    expired: 'Expired',
+};
+
+function historyLabel({status, by_landlord: byLandlord}) {
+    if (byLandlord && status === 'active') return 'Confirmed by landlord';
+    if (byLandlord && status === 'completed') return 'Ended by landlord';
+    return HISTORY_LABELS[status] ?? status;
+}
+
 export function createCustomerOpsService({pool}) {
     // --- inquiries -----------------------------------------------------------
 
@@ -54,7 +70,7 @@ export function createCustomerOpsService({pool}) {
         if (next === 'rejected' && !nullIfBlank(rejectionReason)) {
             throw invalid('Tell the customer why their enquiry was turned down');
         }
-        if (next !== 'rejected' && !nullIfBlank(response)) {
+        if ((next === 'responded' || next === 'accepted') && !nullIfBlank(response)) {
             throw invalid('Write a reply to send to the customer');
         }
 
@@ -73,8 +89,9 @@ export function createCustomerOpsService({pool}) {
 
             await notify(client, rows[0].customer_id, {
                 kind: 'inquiry_response',
-                title: next === 'rejected' ? 'Your enquiry was declined' : 'You have a reply',
-                body: next === 'rejected' ? rejectionReason : response,
+                title: next === 'rejected' ? 'Your enquiry was declined'
+                    : next === 'closed' && !nullIfBlank(response) ? 'Your enquiry was closed' : 'You have a reply',
+                body: next === 'rejected' ? rejectionReason : nullIfBlank(response) ?? 'The home is no longer taking enquiries from you.',
                 subjectTable: 'property_inquiries',
                 subjectId: id,
             });
@@ -103,20 +120,31 @@ export function createCustomerOpsService({pool}) {
     async function getBooking(id) {
         const {rows} = await query(pool, 'select * from v_bookings where id = $1', [id]);
         if (rows.length === 0) throw notFound('Booking');
-        const {rows: payments} = await query(
-            pool,
-            'select * from v_customer_payments where booking_id = $1 order by created_at',
-            [id]
-        );
-        return {...rows[0], payments};
+        const [{rows: payments}, {rows: history}] = await Promise.all([
+            query(pool, 'select * from v_customer_payments where booking_id = $1 order by created_at', [id]),
+            query(pool, 'select booking_status_history($1) as items', [id]),
+        ]);
+        return {
+            ...rows[0],
+            payments,
+            // Each status change, and whether the home's landlord made it (T05)
+            // rather than staff — the portal shows "Confirmed by landlord".
+            history: (history[0].items ?? []).map((entry) => ({...entry, label: historyLabel(entry)})),
+        };
     }
 
     /**
      * Starting or ending a tenancy — the only moves left to a person.
      * Confirming happens when the payment is verified, and an unpaid
      * reservation lapses on its own, so neither is offered here.
+     *
+     * `date` is the move-in day (active) or the last day (completed). The
+     * backoffice may leave it out: moving in then keeps the day the customer
+     * named, else today; ending is today. The database (030) holds both paths
+     * to the same rule — no move-in more than 7 days before the lease starts.
+     * The landlord app (partner-app/tenancies.mjs) always sends it.
      */
-    async function changeBookingStatus(id, {status}, actor) {
+    async function changeBookingStatus(id, {status, date, reason}, actor) {
         const next = nullIfBlank(status);
         if (!next) throw invalid('status is required');
         if (!TENANCY_MOVES.includes(next)) {
@@ -124,14 +152,20 @@ export function createCustomerOpsService({pool}) {
                 'Only starting or ending a tenancy is done by hand. A reservation is confirmed when its payment is verified.'
             );
         }
+        const day = nullIfBlank(date);
 
         return withActor(pool, actor, async (client) => {
             const {rows} = await client.query(
                 `update bookings
-                    set status = $2::booking_status
+                    set status = $2::booking_status,
+                        move_in_date = case when $2 = 'active'
+                                            then coalesce($3::date, move_in_date, current_date)
+                                            else move_in_date end,
+                        ended_on = case when $2 = 'completed' then coalesce($3::date, current_date) else ended_on end,
+                        end_reason = case when $2 = 'completed' then $4 else end_reason end
                   where id = $1
                   returning id, customer_id, reference`,
-                [id, next]
+                [id, next, day, nullIfBlank(reason)]
             );
             if (rows.length === 0) throw notFound('Booking');
 

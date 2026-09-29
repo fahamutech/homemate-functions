@@ -261,19 +261,29 @@ describe('multi-role accounts (Postgres integration)', () => {
             await details.assignParty(property.id, {userId: broker.id, role: 'broker'}, ACTOR);
         });
 
-        test('a broker whose role is pending or suspended cannot fill the broker slot', async () => {
+        test('a suspended broker cannot fill the broker slot', async () => {
             const property = await createProperty();
-            const pending = await insertUser('+255713100021');
-            await setRole(pending.id, 'broker', 'pending_review');
             const suspended = await insertUser('+255713100022', 'broker');
             await setRole(suspended.id, 'broker', 'suspended');
+            await assert.rejects(
+                details.assignParty(property.id, {userId: suspended.id, role: 'broker'}, ACTOR),
+                expectDomainError(ErrorCodes.VALIDATION_FAILED)
+            );
+        });
 
-            for (const user of [pending, suspended]) {
-                await assert.rejects(
-                    details.assignParty(property.id, {userId: user.id, role: 'broker'}, ACTOR),
-                    expectDomainError(ErrorCodes.VALIDATION_FAILED)
-                );
-            }
+        test('an applicant broker may own a draft (T04) but not a listing past review', async () => {
+            const pending = await insertUser('+255713100021');
+            await setRole(pending.id, 'broker', 'pending_review');
+
+            const draft = await createProperty();
+            await details.assignParty(draft.id, {userId: pending.id, role: 'broker'}, ACTOR);
+
+            const reviewed = await createProperty();
+            await pool.query(`update properties set status = 'pending_review' where id = $1`, [reviewed.id]);
+            await assert.rejects(
+                details.assignParty(reviewed.id, {userId: pending.id, role: 'broker'}, ACTOR),
+                expectDomainError(ErrorCodes.VALIDATION_FAILED)
+            );
         });
 
         test('an invited landlord can already be named, so a broker can list for them', async () => {

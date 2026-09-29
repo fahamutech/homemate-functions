@@ -1,6 +1,6 @@
 import {test, describe} from 'node:test';
 import assert from 'node:assert/strict';
-import {createPartnerRoleGuard} from './partner-role-guard.mjs';
+import {createPartnerRoleGuard, createPartnerWorkspaceGuard} from './partner-role-guard.mjs';
 
 /**
  * The partner guard: a route under a broker or landlord workspace must only
@@ -124,5 +124,85 @@ describe('createPartnerRoleGuard', () => {
         const {response, nextCalled} = await run(guard, 'Bearer good');
         assert.equal(response.statusCode, 500);
         assert.equal(nextCalled, false);
+    });
+});
+
+describe('createPartnerWorkspaceGuard', () => {
+    function makeWorkspace({payload, statuses = {}, fail = false} = {}) {
+        const guard = createPartnerWorkspaceGuard({
+            path: '/app/partner/listings',
+            verify: (token) => (token === 'good' ? payload : null),
+            roleStatusOf: async (userId, role) => {
+                if (fail) throw new Error('db down');
+                return statuses[role] ?? null;
+            },
+        });
+        return guard;
+    }
+
+    async function call(guard, {token = 'good', partnerRole} = {}) {
+        const request = {headers: {authorization: `Bearer ${token}`, ...(partnerRole ? {'x-partner-role': partnerRole} : {})}};
+        const response = fakeResponse();
+        let passed = false;
+        await guard.onGuard(request, response, () => {
+            passed = true;
+        });
+        return {request, response, passed};
+    }
+
+    const session = (activeRole) => ({userId: 'u-1', role: 'customer', roles: ['customer'], activeRole});
+
+    test('an active broker acting as broker passes, with the role attached', async () => {
+        const guard = makeWorkspace({payload: session('broker'), statuses: {broker: 'active'}});
+        const {passed, request} = await call(guard);
+        assert.equal(passed, true);
+        assert.equal(request.partnerRole, 'broker');
+        assert.equal(request.partnerRoleStatus, 'active');
+    });
+
+    test('an applicant still in review names the role in X-Partner-Role and may draft', async () => {
+        for (const status of ['applied', 'pending_review', 'action_needed']) {
+            const guard = makeWorkspace({payload: session('customer'), statuses: {landlord: status}});
+            const {passed, request} = await call(guard, {partnerRole: 'landlord'});
+            assert.equal(passed, true, status);
+            assert.equal(request.partnerRole, 'landlord');
+            assert.equal(request.partnerRoleStatus, status);
+        }
+    });
+
+    test('the active role wins over the header', async () => {
+        const guard = makeWorkspace({payload: session('broker'), statuses: {broker: 'active', landlord: 'active'}});
+        const {request} = await call(guard, {partnerRole: 'landlord'});
+        assert.equal(request.partnerRole, 'broker');
+    });
+
+    test('a customer session naming no partner role → 403 ROLE_NOT_ACTIVE', async () => {
+        const guard = makeWorkspace({payload: session('customer')});
+        const {passed, response} = await call(guard);
+        assert.equal(passed, false);
+        assert.equal(response.statusCode, 403);
+        assert.equal(response.body.error, 'ROLE_NOT_ACTIVE');
+    });
+
+    test('a header naming something that is not a partner role → 403', async () => {
+        const guard = makeWorkspace({payload: session('customer'), statuses: {agency: 'active'}});
+        const {response} = await call(guard, {partnerRole: 'agency'});
+        assert.equal(response.statusCode, 403);
+    });
+
+    test('invited, rejected, suspended or missing roles cannot use the workspace', async () => {
+        for (const status of ['invited', 'rejected', 'suspended', null]) {
+            const guard = makeWorkspace({payload: session('customer'), statuses: {broker: status}});
+            const {passed, response} = await call(guard, {partnerRole: 'broker'});
+            assert.equal(passed, false, String(status));
+            assert.equal(response.statusCode, 403);
+        }
+    });
+
+    test('no token → 401; a failing lookup → 500', async () => {
+        const guard = makeWorkspace({payload: session('broker'), statuses: {broker: 'active'}});
+        assert.equal((await call(guard, {token: 'bad'})).response.statusCode, 401);
+        const failing = makeWorkspace({payload: session('broker'), fail: true});
+        assert.equal((await call(failing)).response.statusCode, 500);
     });
 });

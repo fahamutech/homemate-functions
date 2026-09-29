@@ -77,6 +77,32 @@ export function tenantFee(monthlyRent, {tenantFeePercentage, platformPercentage}
 }
 
 /**
+ * The customer's first payment on a home, exactly as checkout charges it:
+ * the deposit, then the advance if the home asks for one or else the first
+ * month, then the tenant fee. The partner app previews the same numbers.
+ */
+export function firstPayment({rent, depositMonths, advanceMonths}, feeSettings) {
+    const monthly = Number(rent);
+    const safeRent = Number.isFinite(monthly) && monthly > 0 ? monthly : 0;
+    const deposit = round2(safeRent * Number(depositMonths ?? 0));
+    const advance = round2(safeRent * Number(advanceMonths ?? 0));
+    const firstRent = advance > 0 ? advance : safeRent;
+    const fee = tenantFee(safeRent, feeSettings);
+    return {rent: safeRent, deposit, advance, firstRent, fee, total: round2(deposit + firstRent + fee.amount)};
+}
+
+/**
+ * What a partner gets from that first payment: a broker the fee less
+ * HomeMate's share; a landlord the rent and deposit whole, plus that fee
+ * share when no broker brought the home.
+ */
+export function partnerEarningPreview(payment, {viewer, brokered}) {
+    const feeShare = viewer === 'broker' || !brokered ? payment.fee.agentAmount : 0;
+    const rentAndDeposit = viewer === 'landlord' ? round2(payment.deposit + payment.firstRent) : 0;
+    return {feeShare, rentAndDeposit, total: round2(feeShare + rentAndDeposit)};
+}
+
+/**
  * How one checkout payment is divided.
  *
  * `fee` is the part of `amount` that is the tenant fee; everything else is the

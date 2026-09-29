@@ -2,6 +2,15 @@ import {getPool} from '../../db/pool.mjs';
 import {smsPort} from '../customer-access/container.mjs';
 import {createPartnerOnboardingService} from './onboarding.mjs';
 import {createPartnerReviewService} from './review.mjs';
+import {createPartnerListingsService} from './listings.mjs';
+import {createLandlordDirectoryService} from './landlords.mjs';
+import {createLandlordConfirmationsService} from './confirmations.mjs';
+import {createPropertiesService} from '../admin-console/properties.mjs';
+import {storagePort} from '../storage/container.mjs';
+import {createPartnerEnquiriesService} from './enquiries.mjs';
+import {createPartnerMoneyService} from './money.mjs';
+import {createLandlordTenanciesService} from './tenancies.mjs';
+import {createCustomerOpsService} from '../admin-console/customer-ops.mjs';
 
 /**
  * Composition root for partner onboarding (T03). Decisions are texted through
@@ -11,3 +20,28 @@ const pool = getPool();
 
 export const partnerOnboarding = createPartnerOnboardingService({pool});
 export const partnerReview = createPartnerReviewService({pool, notificationPort: smsPort});
+
+/**
+ * Partner listings (T04) share the backoffice's StoragePort and property
+ * reader, so a listing made on a phone lands in the same bucket and reads
+ * back through the same code a moderator's does.
+ */
+export const partnerListings = createPartnerListingsService({
+    pool,
+    storagePort,
+    notificationPort: smsPort,
+    properties: createPropertiesService({pool}),
+});
+export const landlordDirectory = createLandlordDirectoryService({pool});
+export const landlordConfirmations = createLandlordConfirmationsService({pool});
+
+/**
+ * Enquiries and tenancies (T05) answer and move bookings through the
+ * backoffice's own customer-ops service — same rules, same notifications.
+ */
+const customerOps = createCustomerOpsService({pool});
+export const partnerEnquiries = createPartnerEnquiriesService({pool, customerOps});
+export const landlordTenancies = createLandlordTenanciesService({pool, customerOps});
+
+/** Earnings, payouts and home summaries (T06) — read-only views of the backoffice's money. */
+export const partnerMoney = createPartnerMoneyService({pool});
