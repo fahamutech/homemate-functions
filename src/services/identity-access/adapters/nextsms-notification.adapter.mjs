@@ -20,6 +20,8 @@ const TEMPLATES = {
         `Your HomeMate booking ${reference} for ${property} is confirmed.`,
     'payment-received': ({reference, amount, currency}) =>
         `HomeMate received your payment ${reference} of ${currency} ${amount}. Thank you.`,
+    'landlord-confirm-listing': ({broker, title, webLink}) =>
+        `HomeMate: ${broker ?? 'A broker'} listed "${title}" as your home. Confirm or dispute it: ${webLink}`,
     'partner-application-decision': ({decision, role, reason, text}) =>
         decision === 'approve'
             ? `HomeMate: your ${role} application is approved. Open the app and switch to your ${role} role.`

@@ -3,7 +3,8 @@ import {DomainError, ErrorCodes, invalid, notFound} from '../../shared/errors.mj
 import {PARTNER_ROLES} from '../../shared/roles.mjs';
 import {readDateOfBirth, readNationalId, readTin} from '../../shared/profile-fields.mjs';
 import {readPayout, toPublicPayout} from './payout.mjs';
-import {toApplicationView} from './application-view.mjs';
+import {toApplicationView, earningExample} from './application-view.mjs';
+import {loadFeeSettings} from '../../shared/fees.mjs';
 
 /**
  * A signed-in person applying to become a broker or a landlord (T03,
@@ -41,6 +42,17 @@ export function createPartnerOnboardingService({pool}) {
         const user = rows[0];
         const applications = [];
         for (const role of PARTNER_ROLES) applications.push(await applicationView(pool, userId, role));
+        const [{rows: remediations}, settings] = await Promise.all([
+            query(
+                pool,
+                `select r.id, r.issue, r.requested_action, r.created_at, d.document_type
+                   from kyc_remediations r left join kyc_documents d on d.id = r.kyc_document_id
+                  where r.user_id = $1 and not r.resolved
+                  order by r.created_at desc`,
+                [userId]
+            ),
+            loadFeeSettings(pool),
+        ]);
         return {
             // What "Your details" is prefilled with.
             profile: {
@@ -53,6 +65,16 @@ export function createPartnerOnboardingService({pool}) {
                 payout: toPublicPayout(user),
             },
             applications,
+            // BRK-002e / LND-002e: what the backoffice asked this person to fix.
+            remediations: remediations.map((r) => ({
+                id: r.id,
+                issue: r.issue,
+                requestedAction: r.requested_action,
+                documentType: r.document_type ?? null,
+                createdAt: r.created_at,
+            })),
+            // BRK-002c "How you earn — an example".
+            feeExample: earningExample(settings),
         };
     }
 

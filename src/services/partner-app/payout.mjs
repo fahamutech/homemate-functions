@@ -1,4 +1,5 @@
 import {invalid} from '../../shared/errors.mjs';
+import {readTanzanianMobile} from '../../shared/phone.mjs';
 
 /** The wallets HomeMate pays out to. Banks come from the `bank` dictionary (028). */
 export const MOBILE_MONEY_PROVIDERS = ['mpesa', 'mixx_by_yas', 'airtel_money', 'halopesa'];
@@ -6,14 +7,10 @@ const METHODS = ['mobile_money', 'bank'];
 
 const text = (value) => (value === undefined || value === null ? '' : `${value}`.trim());
 
-/** +255XXXXXXXXX from either +255… or a local 0… number, spaces allowed. */
 function readWalletNumber(value) {
-    const compact = text(value).replace(/\s+/g, '');
-    const international = /^0\d{9}$/.test(compact) ? `+255${compact.slice(1)}` : compact;
-    if (!/^\+255\d{9}$/.test(international)) {
-        throw invalid('The wallet must be a Tanzanian mobile number like +255712345678');
-    }
-    return international;
+    const number = readTanzanianMobile(value);
+    if (!number) throw invalid('The wallet must be a Tanzanian mobile number like +255712345678');
+    return number;
 }
 
 /**

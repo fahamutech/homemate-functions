@@ -1,7 +1,7 @@
 import {getSharedSessionTokens} from '../../src/shared/session-tokens.mjs';
 import {STAFF_ROLES, readRoleStatus} from '../../src/shared/roles.mjs';
 import {resourceKeysForPath} from '../../src/shared/admin-acl.mjs';
-import {createPartnerRoleGuard} from '../../src/shared/partner-role-guard.mjs';
+import {createPartnerRoleGuard, createPartnerWorkspaceGuard} from '../../src/shared/partner-role-guard.mjs';
 import {getPool} from '../../src/db/pool.mjs';
 
 const created = new Date().toISOString();
@@ -124,3 +124,24 @@ export function requirePartnerRole(role, {path} = {}) {
         roleStatusOf: (userId, askedRole) => readRoleStatus(getPool(), userId, askedRole),
     });
 }
+
+/**
+ * The shared partner workspace (T04): acting as broker or landlord — or, for
+ * an applicant, naming the role in `X-Partner-Role` — with that role in a
+ * workspace status (applied … active). Sets `request.partnerRole`.
+ */
+export function requirePartnerWorkspace({path}) {
+    return createPartnerWorkspaceGuard({
+        path,
+        verify: (token) => getSharedSessionTokens().verify(token),
+        roleStatusOf: (userId, role) => readRoleStatus(getPool(), userId, role),
+    });
+}
+
+export const requirePartnerListingsWorkspace = requirePartnerWorkspace({path: '/app/partner/listings'});
+export const requirePartnerLandlordsWorkspace = requirePartnerWorkspace({path: '/app/partner/landlords'});
+export const requirePartnerInquiriesWorkspace = requirePartnerWorkspace({path: '/app/partner/inquiries'});
+
+// The two partner home screens (T06) need the role active and in use.
+export const requireBrokerForSummary = requirePartnerRole('broker', {path: '/app/broker/summary'});
+export const requireLandlordForSummary = requirePartnerRole('landlord', {path: '/app/landlord/summary'});
