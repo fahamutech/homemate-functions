@@ -1,6 +1,7 @@
 import {test, describe} from 'node:test';
 import assert from 'node:assert/strict';
-import {toPartnerListing, mediaUrl, EDITABLE_STATUSES} from './listing-view.mjs';
+import {toPartnerListing, mediaUrl, moneyPreview, EDITABLE_STATUSES} from './listing-view.mjs';
+import {firstPayment, partnerEarningPreview} from '../../shared/fees.mjs';
 
 describe('toPartnerListing', () => {
     const row = {
@@ -44,5 +45,23 @@ describe('mediaUrl', () => {
         assert.equal(mediaUrl('m-1'), '/app/media/m-1/raw');
         assert.equal(mediaUrl('m-1', {thumbnail: true}), '/app/media/m-1/raw?thumbnail=1');
         assert.equal(mediaUrl(null), null);
+    });
+});
+
+describe('moneyPreview', () => {
+    test('flattens the checkout breakdown and what the viewer earns', () => {
+        const payment = firstPayment({rent: 800000, depositMonths: 1, advanceMonths: 0}, {tenantFeePercentage: 50, platformPercentage: 10});
+        const earning = partnerEarningPreview(payment, {viewer: 'broker', brokered: true});
+        assert.deepEqual(moneyPreview(payment, earning), {
+            rent: 800000,
+            deposit: 800000,
+            advance: 0,
+            firstRent: 800000,
+            tenantFee: 400000,
+            tenantFeePercentage: 50,
+            saving: 400000,
+            total: 2000000,
+            youEarn: {feeShare: 360000, rentAndDeposit: 0, total: 360000},
+        });
     });
 });

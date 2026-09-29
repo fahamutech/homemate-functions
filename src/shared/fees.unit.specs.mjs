@@ -1,7 +1,7 @@
 import {describe, test} from 'node:test';
 import assert from 'node:assert/strict';
 
-import {checkoutSplits, listingAgent, tenantFee} from './fees.mjs';
+import {checkoutSplits, listingAgent, tenantFee, firstPayment, partnerEarningPreview} from './fees.mjs';
 
 const settings = {tenantFeePercentage: 50, platformPercentage: 10};
 const sum = (shares) => Math.round(shares.reduce((total, s) => total + s.amount, 0) * 100) / 100;
@@ -88,5 +88,45 @@ describe('listingAgent', () => {
 
     test('is nobody when only the landlord is on the listing', () => {
         assert.equal(listingAgent([{role: 'landlord', user_id: 'l'}]), null);
+    });
+});
+
+describe('firstPayment', () => {
+    const settings = {tenantFeePercentage: 50, platformPercentage: 10};
+
+    test('deposit, the first month (or the advance instead) and the fee — the checkout total', () => {
+        const paid = firstPayment({rent: 800000, depositMonths: 2, advanceMonths: 0}, settings);
+        assert.deepEqual(paid, {
+            rent: 800000,
+            deposit: 1600000,
+            advance: 0,
+            firstRent: 800000,
+            fee: tenantFee(800000, settings),
+            total: 2800000,
+        });
+    });
+
+    test('an advance replaces the first month rather than adding to it', () => {
+        const paid = firstPayment({rent: 500000, depositMonths: 1, advanceMonths: 3}, settings);
+        assert.equal(paid.firstRent, 1500000);
+        assert.equal(paid.total, 500000 + 1500000 + 250000);
+    });
+
+    test('no price, nothing to pay', () => {
+        assert.equal(firstPayment({rent: null, depositMonths: 2, advanceMonths: 0}, settings).total, 0);
+    });
+});
+
+describe('partnerEarningPreview', () => {
+    const settings = {tenantFeePercentage: 50, platformPercentage: 10};
+    const paid = firstPayment({rent: 800000, depositMonths: 2, advanceMonths: 0}, settings);
+
+    test('a broker earns the fee less HomeMate’s share', () => {
+        assert.deepEqual(partnerEarningPreview(paid, {viewer: 'broker', brokered: true}), {feeShare: 360000, rentAndDeposit: 0, total: 360000});
+    });
+
+    test('a landlord gets rent and deposit in full, and the fee share only with no broker', () => {
+        assert.deepEqual(partnerEarningPreview(paid, {viewer: 'landlord', brokered: true}), {feeShare: 0, rentAndDeposit: 2400000, total: 2400000});
+        assert.deepEqual(partnerEarningPreview(paid, {viewer: 'landlord', brokered: false}), {feeShare: 360000, rentAndDeposit: 2400000, total: 2760000});
     });
 });

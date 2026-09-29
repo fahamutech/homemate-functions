@@ -2,10 +2,11 @@ import {query, withActor} from '../../shared/db.mjs';
 import {DomainError, ErrorCodes, invalid, notFound} from '../../shared/errors.mjs';
 import {PARTNER_ROLES} from '../../shared/roles.mjs';
 import {maskPhone} from '../../shared/phone.mjs';
+import {firstPayment, loadFeeSettings, partnerEarningPreview} from '../../shared/fees.mjs';
 import {insertProperty, patchProperty} from '../admin-console/properties.mjs';
 import {upsertParty, replaceAmenities, insertCharge, storeImage} from '../admin-console/property-details.mjs';
 import {readListingInput, describeSubmitBlockers} from './listing-input.mjs';
-import {toPartnerListing, mediaUrl, EDITABLE_STATUSES} from './listing-view.mjs';
+import {toPartnerListing, mediaUrl, moneyPreview, EDITABLE_STATUSES} from './listing-view.mjs';
 
 const PROPERTY_STATUSES = ['draft', 'pending_review', 'approved', 'rejected', 'changes_requested', 'suspended', 'archived'];
 
@@ -92,6 +93,10 @@ export function createPartnerListingsService({pool, storagePort, notificationPor
         const {media, amenities, charges, parties: _parties, paymentMethods: _methods, ...row} = record;
         const view = toPartnerListing(row, {userId, createdBy: access.createdBy});
         const blockers = view.editable ? await submitBlockers(pool, id, userId, role) : [];
+        const payment = firstPayment(
+            {rent: row.price, depositMonths: row.deposit_months, advanceMonths: row.advance_rent_months},
+            await loadFeeSettings(pool)
+        );
 
         return {
             ...view,
@@ -126,6 +131,7 @@ export function createPartnerListingsService({pool, storagePort, notificationPor
             listedBy: {you: access.createdBy === userId, name: access.creatorName},
             submitBlockers: blockers,
             canSubmit: view.editable && blockers.length === 0,
+            moneyPreview: moneyPreview(payment, partnerEarningPreview(payment, {viewer: role, brokered: Boolean(broker)})),
         };
     }
 
