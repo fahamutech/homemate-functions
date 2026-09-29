@@ -7,6 +7,9 @@ import {createLandlordDirectoryService} from './landlords.mjs';
 import {createLandlordConfirmationsService} from './confirmations.mjs';
 import {createPropertiesService} from '../admin-console/properties.mjs';
 import {storagePort} from '../storage/container.mjs';
+import {createPartnerEnquiriesService} from './enquiries.mjs';
+import {createLandlordTenanciesService} from './tenancies.mjs';
+import {createCustomerOpsService} from '../admin-console/customer-ops.mjs';
 
 /**
  * Composition root for partner onboarding (T03). Decisions are texted through
@@ -30,3 +33,11 @@ export const partnerListings = createPartnerListingsService({
 });
 export const landlordDirectory = createLandlordDirectoryService({pool});
 export const landlordConfirmations = createLandlordConfirmationsService({pool});
+
+/**
+ * Enquiries and tenancies (T05) answer and move bookings through the
+ * backoffice's own customer-ops service — same rules, same notifications.
+ */
+const customerOps = createCustomerOpsService({pool});
+export const partnerEnquiries = createPartnerEnquiriesService({pool, customerOps});
+export const landlordTenancies = createLandlordTenanciesService({pool, customerOps});

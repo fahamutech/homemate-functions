@@ -115,8 +115,14 @@ export function createCustomerOpsService({pool}) {
      * Starting or ending a tenancy — the only moves left to a person.
      * Confirming happens when the payment is verified, and an unpaid
      * reservation lapses on its own, so neither is offered here.
+     *
+     * `date` is the move-in day (active) or the last day (completed). The
+     * backoffice may leave it out: moving in then keeps the day the customer
+     * named, else today; ending is today. The database (030) holds both paths
+     * to the same rule — no move-in more than 7 days before the lease starts.
+     * The landlord app (partner-app/tenancies.mjs) always sends it.
      */
-    async function changeBookingStatus(id, {status}, actor) {
+    async function changeBookingStatus(id, {status, date, reason}, actor) {
         const next = nullIfBlank(status);
         if (!next) throw invalid('status is required');
         if (!TENANCY_MOVES.includes(next)) {
@@ -124,14 +130,20 @@ export function createCustomerOpsService({pool}) {
                 'Only starting or ending a tenancy is done by hand. A reservation is confirmed when its payment is verified.'
             );
         }
+        const day = nullIfBlank(date);
 
         return withActor(pool, actor, async (client) => {
             const {rows} = await client.query(
                 `update bookings
-                    set status = $2::booking_status
+                    set status = $2::booking_status,
+                        move_in_date = case when $2 = 'active'
+                                            then coalesce($3::date, move_in_date, current_date)
+                                            else move_in_date end,
+                        ended_on = case when $2 = 'completed' then coalesce($3::date, current_date) else ended_on end,
+                        end_reason = case when $2 = 'completed' then $4 else end_reason end
                   where id = $1
                   returning id, customer_id, reference`,
-                [id, next]
+                [id, next, day, nullIfBlank(reason)]
             );
             if (rows.length === 0) throw notFound('Booking');
 
