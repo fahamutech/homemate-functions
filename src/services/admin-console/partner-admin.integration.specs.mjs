@@ -5,6 +5,7 @@ import {createUsersService} from './users.mjs';
 import {createPropertiesService} from './properties.mjs';
 import {createPropertyDetailsService} from './property-details.mjs';
 import {createCustomerOpsService} from './customer-ops.mjs';
+import {createKycService} from './kyc.mjs';
 import {createMemoryStorageAdapter} from '../storage/adapters/memory-storage.adapter.mjs';
 import {ErrorCodes} from '../../shared/errors.mjs';
 
@@ -32,6 +33,7 @@ describe('backoffice support for partner roles (Postgres integration)', () => {
     let properties;
     let details;
     let customerOps;
+    let kyc;
 
     before(async () => {
         pool = new pg.Pool({connectionString: process.env.DATABASE_URL});
@@ -39,6 +41,7 @@ describe('backoffice support for partner roles (Postgres integration)', () => {
         properties = createPropertiesService({pool});
         details = createPropertyDetailsService({pool, storagePort: createMemoryStorageAdapter()});
         customerOps = createCustomerOpsService({pool});
+        kyc = createKycService({pool, storagePort: createMemoryStorageAdapter()});
     });
 
     after(async () => {
@@ -114,6 +117,17 @@ describe('backoffice support for partner roles (Postgres integration)', () => {
                 users.changeRoleStatus(person, 'landlord', {status: 'rejected'}, ADMIN),
                 expectDomainError(ErrorCodes.VALIDATION_FAILED)
             );
+        });
+    });
+
+    describe('the person screen', () => {
+        test('the identity profile carries the person’s roles for the Roles tab', async () => {
+            const broker = await user('+255715000004', 'Juma Broker', 'broker');
+            await users.changeRoleStatus(broker, 'broker', {status: 'suspended', reason: 'Checks'}, ADMIN);
+            const profile = await kyc.getProfile(broker);
+            const byRole = Object.fromEntries(profile.roles.map((r) => [r.role, r.status]));
+            assert.equal(byRole.broker, 'suspended');
+            assert.equal(byRole.customer, 'active');
         });
     });
 
