@@ -1,5 +1,6 @@
 import {withActor, query, toPage, pageParams, nullIfBlank} from '../../shared/db.mjs';
 import {notFound, invalid, DomainError, ErrorCodes} from '../../shared/errors.mjs';
+import {MOBILE_MONEY_PROVIDERS} from '../partner-app/payout.mjs';
 import {loadFeeSettings, tenantFee} from '../../shared/fees.mjs';
 
 /**
@@ -142,7 +143,7 @@ export function createCustomerAppService({pool}) {
             pool,
             `select id, category, code, name, parent_id, sort_order
                from dictionary_items
-              where is_active and category in ('property_type', 'amenity', 'region', 'district', 'ward')
+              where is_active and category in ('property_type', 'amenity', 'region', 'district', 'ward', 'bank')
               order by category, sort_order, name`
         );
 
@@ -157,6 +158,9 @@ export function createCustomerAppService({pool}) {
             regions: by('region'),
             districts: by('district'),
             wards: by('ward'),
+            // The "Getting paid" pickers (T03): a bank's code is what PUT /app/me/payout takes.
+            banks: by('bank'),
+            mobileMoneyProviders: MOBILE_MONEY_PROVIDERS,
         };
     }
 

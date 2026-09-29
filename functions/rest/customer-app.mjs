@@ -100,7 +100,7 @@ export const appReverseGeocode = route({
 export const appReferenceData = route({
     method: 'get',
     path: '/app/reference',
-    description: 'Property types, amenities and the region/district/ward tree, for the app’s pickers',
+    description: 'Property types, amenities, the region/district/ward tree, banks and wallets, for the app’s pickers',
     handler: () => customerApp.referenceData(),
 });
 
