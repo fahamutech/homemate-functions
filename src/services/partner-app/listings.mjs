@@ -127,7 +127,12 @@ export function createPartnerListingsService({pool, storagePort, notificationPor
                 confirmedAt: landlord.confirmed_at,
                 disputeReason: landlord.dispute_reason,
             },
-            broker: broker && {userId: broker.user_id, name: broker.full_name},
+            // The landlord calls or WhatsApps the broker who listed their home (LND-021).
+            broker: broker && {
+                userId: broker.user_id,
+                name: broker.full_name,
+                ...(role === 'landlord' ? {phone: broker.phone_number} : {}),
+            },
             listedBy: {you: access.createdBy === userId, name: access.creatorName},
             submitBlockers: blockers,
             canSubmit: view.editable && blockers.length === 0,

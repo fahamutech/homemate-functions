@@ -196,6 +196,17 @@ describe('partner listings (Postgres integration)', () => {
             assert.equal(mine.items[0].confirmed, false);
         });
 
+        test('the landlord sees who the broker is and can reach them (LND-021); the broker sees no phone of their own', async () => {
+            const brokerId = await broker();
+            const landlordId = await landlord();
+            const listing = await brokerListing(brokerId, landlordId);
+
+            const asLandlord = await listings.get(landlordId, 'landlord', listing.id);
+            assert.deepEqual(asLandlord.broker, {userId: brokerId, name: 'Juma Broker', phone: BROKER_PHONE});
+            const asBroker = await listings.get(brokerId, 'broker', listing.id);
+            assert.equal(asBroker.broker.phone, undefined);
+        });
+
         test('my listings: status, cover photo, rent and open enquiries, filterable', async () => {
             const brokerId = await broker();
             const landlordId = await landlord();
