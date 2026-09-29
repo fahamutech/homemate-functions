@@ -325,6 +325,8 @@ describe('partner enquiries and landlord tenancies (Postgres integration)', () =
 
             const lease = await tenancies.lease(selfLandlord, bookingId);
             assert.equal(lease.bookingReference, detail.reference);
+            const {rows: me} = await pool.query('select full_name from users where id = $1', [selfLandlord]);
+            assert.equal(lease.landlordName, me[0].full_name, 'the lease names both parties');
         });
 
         test('the landlord of a broker-listed home still owns its tenancies', async () => {

@@ -39,7 +39,7 @@ export function createPartnerListingsService({pool, storagePort, notificationPor
                     p.submitted_at, p.reviewed_at, p.created_at, p.updated_at, p.created_by_user_id,
                     (select m.id from property_media m where m.property_id = p.id and m.is_cover limit 1) as cover_media_id,
                     (select count(*)::int from property_inquiries i
-                      where i.property_id = p.id and i.status in ('pending', 'responded', 'accepted')) as open_enquiries,
+                      where i.property_id = p.id and i.status in ('pending', 'responded')) as open_enquiries,
                     landlord.confirmation_status as landlord_confirmation,
                     creator.full_name as creator_name
                from properties p

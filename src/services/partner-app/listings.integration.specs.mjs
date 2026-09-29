@@ -219,6 +219,16 @@ describe('partner listings (Postgres integration)', () => {
                  values ('INQ-1', $1, $2, 'pending', 'Is it free?')`,
                 [listing.id, customer]
             );
+            // "Open" means still waiting on an answer, as on the home summary:
+            // an accepted, declined or closed enquiry is not counted.
+            for (const [reference, status] of [['INQ-2', 'responded'], ['INQ-3', 'accepted'], ['INQ-4', 'rejected'], ['INQ-5', 'closed']]) {
+                const other = await user(`+2557137001${reference.slice(-1)}0`);
+                await pool.query(
+                    `insert into property_inquiries (reference, property_id, customer_id, status, message, rejection_reason)
+                     values ($1, $2, $3, $4::inquiry_status, 'Is it free?', case when $4::text = 'rejected' then 'Let already' end)`,
+                    [reference, listing.id, other, status]
+                );
+            }
 
             const all = await listings.list(brokerId, 'broker', {});
             assert.equal(all.items.length, 2);
@@ -226,7 +236,7 @@ describe('partner listings (Postgres integration)', () => {
             assert.equal(item.status, 'draft');
             assert.equal(Number(item.price), 900000);
             assert.match(item.coverPhotoUrl, /^\/app\/media\/[0-9a-f-]+\/raw$/);
-            assert.equal(item.openEnquiries, 1);
+            assert.equal(item.openEnquiries, 2, 'pending and responded only');
             assert.deepEqual(item.listedBy, {you: true, name: 'Juma Broker'});
 
             assert.equal((await listings.list(brokerId, 'broker', {status: 'pending_review'})).items.length, 0);

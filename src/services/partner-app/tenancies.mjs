@@ -24,18 +24,19 @@ export function createLandlordTenanciesService({pool, customerOps}) {
     }
 
     async function lease(userId, id) {
-        await load(userId, id);
+        const tenancy = await load(userId, id);
         const {rows} = await query(
             pool,
             `select la.id, la.reference, la.version, la.lease_type, la.document_url, la.notice_period_days,
                     la.terms, la.house_rules, la.accepted_at,
                     b.reference as booking_reference, b.lease_start_date, b.lease_end_date, b.monthly_rent,
                     b.currency, b.deposit_amount, b.lease_months, b.property_title, b.property_address,
-                    b.customer_name
+                    b.customer_name, landlord.full_name as landlord_name
                from v_bookings b
                left join lease_agreements la on la.booking_id = b.id
+               left join users landlord on landlord.id = $2
               where b.id = $1`,
-            [id]
+            [id, tenancy.landlord_user_id]
         );
         const r = rows[0];
         return {
@@ -62,6 +63,7 @@ export function createLandlordTenanciesService({pool, customerOps}) {
             propertyTitle: r.property_title,
             propertyAddress: r.property_address,
             tenantName: r.customer_name,
+            landlordName: r.landlord_name,
         };
     }
 
