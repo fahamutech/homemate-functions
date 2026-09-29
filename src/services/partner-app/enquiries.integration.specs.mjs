@@ -204,6 +204,20 @@ describe('partner enquiries and landlord tenancies (Postgres integration)', () =
             assert.equal((await enquiries.list(broker, 'broker', {status: 'closed'})).items.length, 1);
         });
 
+        test('closing without replying is allowed and tells the customer nothing new (BRK-041)', async () => {
+            const inquiry = await enquire(brokeredHome);
+            await assert.rejects(
+                enquiries.respond(broker, 'broker', inquiry.id, {status: 'responded'}),
+                expectDomainError(ErrorCodes.VALIDATION_FAILED, /reply/)
+            );
+            const closed = await enquiries.respond(broker, 'broker', inquiry.id, {status: 'closed'});
+            assert.equal(closed.status, 'closed');
+            const {rows} = await pool.query(
+                `select title from notifications where subject_id = $1 and kind = 'inquiry_response'`, [inquiry.id]
+            );
+            assert.deepEqual(rows.map((r) => r.title), ['Your enquiry was closed']);
+        });
+
         test('a landlord answers on a home they listed themselves', async () => {
             const inquiry = await enquire(selfListedHome);
             const answered = await enquiries.respond(selfLandlord, 'landlord', inquiry.id, {status: 'responded', response: 'Come and see it'});
@@ -256,6 +270,16 @@ describe('partner enquiries and landlord tenancies (Postgres integration)', () =
                 yourShare: 450000,
                 rentGoesTo: 'landlord',
             });
+            // BRK-042 "What the customer pays", the checkout formula on the listing.
+            assert.deepEqual(tracker.payment, {
+                basis: 'listing_price',
+                firstRent: 1000000,
+                deposit: 1000000,
+                advance: 0,
+                tenantFee: 500000,
+                tenantFeePercentage: 50,
+                total: 2500000,
+            });
 
             await enquiries.respond(broker, 'broker', inquiry.id, {status: 'accepted', response: 'Welcome'});
             tracker = await enquiries.journey(broker, 'broker', inquiry.id);
@@ -272,6 +296,8 @@ describe('partner enquiries and landlord tenancies (Postgres integration)', () =
             assert.equal(state('moved_in'), 'current');
             assert.equal(tracker.earning.basis, 'booking');
             assert.equal(tracker.earning.yourShare, 450000);
+            assert.equal(tracker.payment.basis, 'booking');
+            assert.equal(tracker.payment.total, 2500000, 'what was actually charged');
 
             const landlordView = await enquiries.journey(landlord, 'landlord', inquiry.id);
             assert.equal(landlordView.earning.yourShare, 0, 'the broker earns the fee on a brokered home');

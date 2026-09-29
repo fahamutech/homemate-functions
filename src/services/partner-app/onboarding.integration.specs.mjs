@@ -142,6 +142,36 @@ describe('partner onboarding (Postgres integration)', () => {
             assert.equal(broker.currentAgreementVersion, 'v1.0');
         });
 
+        test('carries the "How you earn" example, from the fee settings (BRK-002c)', async () => {
+            const me = await customer();
+            const {feeExample} = await onboarding.listApplications(me);
+            assert.deepEqual(feeExample, {
+                rent: 1200000,
+                tenantFee: 600000,
+                tenantFeePercentage: 50,
+                platformAmount: 60000,
+                platformPercentage: 10,
+                youReceive: 540000,
+            });
+        });
+
+        test('lists what the backoffice asked for while action is needed (BRK-002e)', async () => {
+            const me = await customer();
+            const selfie = await upload(me, 'selfie');
+            await pool.query(
+                `insert into kyc_remediations (user_id, kyc_document_id, issue, requested_action, raised_by)
+                 values ($1, $2, 'Your selfie is too dark', 'Take a new selfie facing a window', 'ops@homemate.co.tz'),
+                        ($1, null, 'Old one', 'Done already', 'ops@homemate.co.tz')`,
+                [me, selfie.id]
+            );
+            await pool.query(`update kyc_remediations set resolved = true where issue = 'Old one'`);
+            const {remediations} = await onboarding.listApplications(me);
+            assert.equal(remediations.length, 1);
+            assert.equal(remediations[0].issue, 'Your selfie is too dark');
+            assert.equal(remediations[0].requestedAction, 'Take a new selfie facing a window');
+            assert.equal(remediations[0].documentType, 'selfie');
+        });
+
         test('details are prefilled from the customer profile', async () => {
             const me = await customer();
             const {profile} = await onboarding.listApplications(me);

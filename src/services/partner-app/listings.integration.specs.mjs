@@ -196,6 +196,17 @@ describe('partner listings (Postgres integration)', () => {
             assert.equal(mine.items[0].confirmed, false);
         });
 
+        test('the landlord sees who the broker is and can reach them (LND-021); the broker sees no phone of their own', async () => {
+            const brokerId = await broker();
+            const landlordId = await landlord();
+            const listing = await brokerListing(brokerId, landlordId);
+
+            const asLandlord = await listings.get(landlordId, 'landlord', listing.id);
+            assert.deepEqual(asLandlord.broker, {userId: brokerId, name: 'Juma Broker', phone: BROKER_PHONE});
+            const asBroker = await listings.get(brokerId, 'broker', listing.id);
+            assert.equal(asBroker.broker.phone, undefined);
+        });
+
         test('my listings: status, cover photo, rent and open enquiries, filterable', async () => {
             const brokerId = await broker();
             const landlordId = await landlord();
@@ -326,6 +337,38 @@ describe('partner listings (Postgres integration)', () => {
                 ]);
                 return true;
             });
+        });
+    });
+
+    describe('the money preview on rent & terms (BRK-030c)', () => {
+        test('what the tenant pays to move in, and what the viewer earns — from the checkout formula', async () => {
+            await pool.query(`update settings set value = case key when 'commission.tenant_fee_percentage' then '50'::jsonb else '10'::jsonb end
+                               where key in ('commission.tenant_fee_percentage', 'commission.platform_percentage')`);
+            const brokerId = await broker();
+            const draft = await listings.create(brokerId, 'broker', basics({price: 800000, depositMonths: 2}));
+            assert.deepEqual(draft.moneyPreview, {
+                rent: 800000,
+                deposit: 1600000,
+                advance: 0,
+                firstRent: 800000,
+                tenantFee: 400000,
+                tenantFeePercentage: 50,
+                saving: 400000,
+                total: 2800000,
+                youEarn: {feeShare: 360000, rentAndDeposit: 0, total: 360000},
+            });
+
+            const updated = await listings.update(brokerId, 'broker', draft.id, {price: 1000000, advanceRentMonths: 3});
+            assert.equal(updated.moneyPreview.firstRent, 3000000);
+            assert.equal(updated.moneyPreview.total, 2000000 + 3000000 + 500000);
+        });
+
+        test('a landlord listing their own home gets rent, deposit and the fee share', async () => {
+            await pool.query(`update settings set value = case key when 'commission.tenant_fee_percentage' then '50'::jsonb else '10'::jsonb end
+                               where key in ('commission.tenant_fee_percentage', 'commission.platform_percentage')`);
+            const landlordId = await landlord();
+            const draft = await listings.create(landlordId, 'landlord', basics({price: 800000, depositMonths: 2}));
+            assert.deepEqual(draft.moneyPreview.youEarn, {feeShare: 360000, rentAndDeposit: 2400000, total: 2760000});
         });
     });
 
