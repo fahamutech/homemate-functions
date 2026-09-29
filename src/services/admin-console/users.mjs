@@ -1,6 +1,7 @@
 import {withActor, query, toPage, pageParams, nullIfBlank, updateById} from '../../shared/db.mjs';
 import {notFound, invalid} from '../../shared/errors.mjs';
-import {PLATFORM_ROLES, STAFF_ROLES} from '../../shared/roles.mjs';
+import {PLATFORM_ROLES, STAFF_ROLES, readRolesForUsers} from '../../shared/roles.mjs';
+import {publicRole} from '../../shared/active-role.mjs';
 import {hashPassword, generateInitialPassword} from '../../shared/passwords.mjs';
 
 export {PLATFORM_ROLES, STAFF_ROLES};
@@ -21,6 +22,15 @@ function normalizeAllowedRoutes(value) {
 function triState(value) {
     if (value === undefined || value === null || value === '') return null;
     return value === true || value === 'true';
+}
+
+/**
+ * Adds `roles` (the account's user_roles rows, migration 027) to each user
+ * row, in one query for the whole page. Staff have none.
+ */
+async function withRoles(db, userRows) {
+    const byUser = await readRolesForUsers(db, userRows.map((row) => row.id));
+    return userRows.map((row) => ({...row, roles: (byUser.get(row.id) ?? []).map(publicRole)}));
 }
 
 /**
@@ -48,13 +58,15 @@ export function createUsersService({pool}) {
                 offset,
             ]
         );
-        return toPage(rows, {limit, offset});
+        const page = toPage(rows, {limit, offset});
+        return {...page, items: await withRoles(pool, page.items)};
     }
 
     async function getById(id) {
         const {rows} = await query(pool, 'select * from v_users where id = $1', [id]);
         if (rows.length === 0) throw notFound('User');
-        return rows[0];
+        const [user] = await withRoles(pool, rows);
+        return user;
     }
 
     async function create(input, actor) {
@@ -98,7 +110,8 @@ export function createUsersService({pool}) {
                 ]
             );
             const {rows: created} = await client.query('select * from v_users where id = $1', [rows[0].id]);
-            return initialPassword ? {...created[0], initial_password: initialPassword} : created[0];
+            const [user] = await withRoles(client, created);
+            return initialPassword ? {...user, initial_password: initialPassword} : user;
         });
     }
 
@@ -125,7 +138,8 @@ export function createUsersService({pool}) {
             });
             if (!updated) throw notFound('User');
             const {rows} = await client.query('select * from v_users where id = $1', [id]);
-            return rows[0];
+            const [user] = await withRoles(client, rows);
+            return user;
         });
     }
 
@@ -152,7 +166,8 @@ export function createUsersService({pool}) {
             );
             if (rows.length === 0) throw notFound('User');
             const {rows: updated} = await client.query('select * from v_users where id = $1', [id]);
-            return updated[0];
+            const [user] = await withRoles(client, updated);
+            return user;
         });
     }
 

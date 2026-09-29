@@ -12,12 +12,14 @@ export class DomainError extends Error {
      * @param {string} code
      * @param {string} message
      * @param {number} [status]
+     * @param {Record<string, unknown>} [details] extra fields the client can act on
      */
-    constructor(code, message, status = 400) {
+    constructor(code, message, status = 400, details = undefined) {
         super(message);
         this.name = 'DomainError';
         this.code = code;
         this.status = status;
+        this.details = details;
     }
 }
 
@@ -30,6 +32,7 @@ export const ErrorCodes = Object.freeze({
     UNAUTHORIZED: 'UNAUTHORIZED',
     FORBIDDEN: 'FORBIDDEN',
     RATE_LIMITED: 'RATE_LIMITED',
+    ROLE_NOT_ACTIVE: 'ROLE_NOT_ACTIVE',
     INTERNAL_ERROR: 'INTERNAL_ERROR',
 });
 

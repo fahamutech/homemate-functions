@@ -475,6 +475,12 @@ describe('customer app (Postgres integration)', () => {
             assert.ok(reference.propertyTypes.some((type) => type.code === 'apartment'));
         });
 
+        test('lists the banks and wallets a partner can be paid to (T03 payout step)', async () => {
+            const reference = await app.referenceData();
+            assert.ok(reference.banks.some((bank) => bank.code === 'crdb' && bank.name === 'CRDB Bank'));
+            assert.deepEqual(reference.mobileMoneyProviders, ['mpesa', 'mixx_by_yas', 'airtel_money', 'halopesa']);
+        });
+
         test('places districts under their region, so the picker can cascade', async () => {
             const reference = await app.referenceData();
             const dar = reference.regions.find((region) => region.code === 'dar_es_salaam');

@@ -425,6 +425,7 @@ describe('journey: rent collection and disbursement (e2e)', () => {
             staff: 0,
             payments: 0,
             inquiries: 0,
+            partners: 0,
         });
 
         const landlord = await createUser({

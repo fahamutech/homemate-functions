@@ -29,7 +29,9 @@ export function route({method, path, description, requestSample, responseSample,
                 response.status(200).json(result ?? {});
             } catch (error) {
                 if (error instanceof DomainError) {
-                    response.status(error.status).json({error: error.code, message: error.message});
+                    response
+                        .status(error.status)
+                        .json({error: error.code, message: error.message, ...(error.details ? {details: error.details} : {})});
                     return;
                 }
                 console.error(`${method.toUpperCase()} ${path} failed`, error);
