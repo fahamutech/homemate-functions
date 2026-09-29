@@ -70,7 +70,7 @@ export function createCustomerOpsService({pool}) {
         if (next === 'rejected' && !nullIfBlank(rejectionReason)) {
             throw invalid('Tell the customer why their enquiry was turned down');
         }
-        if (next !== 'rejected' && !nullIfBlank(response)) {
+        if ((next === 'responded' || next === 'accepted') && !nullIfBlank(response)) {
             throw invalid('Write a reply to send to the customer');
         }
 
@@ -89,8 +89,9 @@ export function createCustomerOpsService({pool}) {
 
             await notify(client, rows[0].customer_id, {
                 kind: 'inquiry_response',
-                title: next === 'rejected' ? 'Your enquiry was declined' : 'You have a reply',
-                body: next === 'rejected' ? rejectionReason : response,
+                title: next === 'rejected' ? 'Your enquiry was declined'
+                    : next === 'closed' && !nullIfBlank(response) ? 'Your enquiry was closed' : 'You have a reply',
+                body: next === 'rejected' ? rejectionReason : nullIfBlank(response) ?? 'The home is no longer taking enquiries from you.',
                 subjectTable: 'property_inquiries',
                 subjectId: id,
             });

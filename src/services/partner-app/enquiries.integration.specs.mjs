@@ -204,6 +204,20 @@ describe('partner enquiries and landlord tenancies (Postgres integration)', () =
             assert.equal((await enquiries.list(broker, 'broker', {status: 'closed'})).items.length, 1);
         });
 
+        test('closing without replying is allowed and tells the customer nothing new (BRK-041)', async () => {
+            const inquiry = await enquire(brokeredHome);
+            await assert.rejects(
+                enquiries.respond(broker, 'broker', inquiry.id, {status: 'responded'}),
+                expectDomainError(ErrorCodes.VALIDATION_FAILED, /reply/)
+            );
+            const closed = await enquiries.respond(broker, 'broker', inquiry.id, {status: 'closed'});
+            assert.equal(closed.status, 'closed');
+            const {rows} = await pool.query(
+                `select title from notifications where subject_id = $1 and kind = 'inquiry_response'`, [inquiry.id]
+            );
+            assert.deepEqual(rows.map((r) => r.title), ['Your enquiry was closed']);
+        });
+
         test('a landlord answers on a home they listed themselves', async () => {
             const inquiry = await enquire(selfListedHome);
             const answered = await enquiries.respond(selfLandlord, 'landlord', inquiry.id, {status: 'responded', response: 'Come and see it'});
