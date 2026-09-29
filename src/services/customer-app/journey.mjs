@@ -1,7 +1,7 @@
 import {withActor, query, toPage, pageParams, nullIfBlank} from '../../shared/db.mjs';
 import {notFound, invalid, DomainError, ErrorCodes} from '../../shared/errors.mjs';
 import {resolveLeaseMonths} from './lease-terms.mjs';
-import {checkoutSplits, loadFeeSettings, loadListingParties, round2, tenantFee} from '../../shared/fees.mjs';
+import {checkoutSplits, firstPayment, loadFeeSettings, loadListingParties, round2, tenantFee} from '../../shared/fees.mjs';
 
 /**
  * The part of the customer's journey that runs from "the landlord said yes" to
@@ -243,15 +243,13 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
                     throw invalid('This property has no price set, so it cannot be booked yet');
                 }
 
-                const depositMonths = Number(p.deposit_months ?? 0);
-                const advanceMonths = Number(p.advance_rent_months ?? 0);
                 const leaseMonths = resolveLeaseMonths(input.leaseMonths, p.min_lease_months);
 
-                const deposit = round2(rent * depositMonths);
-                const advance = round2(rent * advanceMonths);
                 const feeSettings = await loadFeeSettings(client);
-                const fee = tenantFee(rent, feeSettings);
-                const totalDue = round2(deposit + (advance > 0 ? advance : rent) + fee.amount);
+                const {deposit, fee, total: totalDue} = firstPayment(
+                    {rent, depositMonths: p.deposit_months, advanceMonths: p.advance_rent_months},
+                    feeSettings
+                );
 
                 const {rows: booking} = await client.query(
                     `insert into bookings
@@ -270,7 +268,7 @@ export function createCustomerJourneyService({pool, paymentPorts = {}}) {
                         rent,
                         p.currency ?? 'TZS',
                         deposit,
-                        advanceMonths,
+                        Number(p.advance_rent_months ?? 0),
                         p.payment_frequency ?? 'monthly',
                         leaseMonths,
                         nullIfBlank(input.moveInDate),

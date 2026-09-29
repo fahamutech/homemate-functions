@@ -1,3 +1,4 @@
+import {tenantFee} from '../../shared/fees.mjs';
 /** The onboarding steps in screen order (BRK-002a–e, LND-002a–d). Only landlords have `ownership`. */
 export const STEP_ORDER = ['details', 'identity', 'ownership', 'payout', 'agreement'];
 
@@ -34,5 +35,21 @@ export function toApplicationView(state) {
         activatedAt: state.activatedAt ?? null,
         reviewedAt: state.reviewedAt ?? null,
         rejectionReason: state.rejectionReason ?? null,
+    };
+}
+
+/** The rent the "How you earn" example on the payout step is worked on. */
+export const EXAMPLE_RENT = 1200000;
+
+/** BRK-002c's example: the tenant fee on a sample rent and what the partner keeps of it. */
+export function earningExample(settings, rent = EXAMPLE_RENT) {
+    const fee = tenantFee(rent, settings);
+    return {
+        rent,
+        tenantFee: fee.amount,
+        tenantFeePercentage: fee.percentage,
+        platformAmount: fee.platformAmount,
+        platformPercentage: fee.platformPercentage,
+        youReceive: fee.agentAmount,
     };
 }

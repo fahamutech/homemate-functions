@@ -31,3 +31,22 @@ export function toPartnerListing(row, {userId, createdBy}) {
     view.editable = createdBy === userId && EDITABLE_STATUSES.includes(row.status);
     return view;
 }
+
+/**
+ * BRK-030c's "What the tenant pays to move in" and "You earn", from the
+ * checkout formula in shared/fees.mjs — the app shows these, it never works
+ * them out.
+ */
+export function moneyPreview(payment, earning) {
+    return {
+        rent: payment.rent,
+        deposit: payment.deposit,
+        advance: payment.advance,
+        firstRent: payment.firstRent,
+        tenantFee: payment.fee.amount,
+        tenantFeePercentage: payment.fee.percentage,
+        saving: payment.fee.saving,
+        total: payment.total,
+        youEarn: earning,
+    };
+}
