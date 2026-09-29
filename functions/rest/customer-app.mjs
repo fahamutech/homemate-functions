@@ -6,6 +6,7 @@ import {
     storagePort,
 } from '../../src/services/customer-app/container.mjs';
 import {route} from '../../src/shared/http.mjs';
+import {decodeUpload} from '../../src/shared/uploads.mjs';
 import {invalid} from '../../src/shared/errors.mjs';
 import {getPool} from '../../src/db/pool.mjs';
 
@@ -236,21 +237,7 @@ export const appActivitySummary = route({
 
 // --- identity (KYC), from the customer's own phone ---------------------------
 
-/**
- * Files arrive as base64 in the JSON body, the same way the backoffice takes
- * them: the app has no storage credentials and never will, so every byte goes
- * through here.
- */
-function decodeUpload(payload, field) {
-    if (!payload) return null;
-    const base64 = payload.base64 ?? payload.data;
-    if (!base64) throw invalid(`${field}.base64 is required`);
-    return {
-        name: payload.name,
-        contentType: payload.contentType ?? 'application/octet-stream',
-        body: Buffer.from(String(base64).replace(/^data:[^,]+,/, ''), 'base64'),
-    };
-}
+// Files arrive as base64 in the JSON body (src/shared/uploads.mjs).
 
 export const appGetIdentity = route({
     method: 'get',

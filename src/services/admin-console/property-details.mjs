@@ -8,6 +8,152 @@ function numberOrNull(value, field) {
     return parsed;
 }
 
+// --- Transaction-level writers ---------------------------------------------
+//
+// Each takes the caller's client, so the backoffice (below) and the partner
+// app (src/services/partner-app/listings.mjs) write parties, amenities,
+// charges and images through the same code inside their own transactions.
+
+/**
+ * Assigning a party is idempotent per (property, user, role) — re-assigning
+ * updates the commission/primary flag rather than failing, which is what an
+ * admin correcting a mistake expects.
+ *
+ * @returns {Promise<string>} the party row id
+ */
+export async function upsertParty(client, propertyId, input, actor) {
+    const userId = nullIfBlank(input.userId);
+    const role = nullIfBlank(input.role);
+    if (!userId) throw invalid('userId is required');
+    if (!['landlord', 'broker', 'agency'].includes(role)) {
+        throw invalid('role must be one of: landlord, broker, agency');
+    }
+    const commission = numberOrNull(input.commissionPercentage, 'commissionPercentage');
+
+    const {rows} = await client.query(
+        `insert into property_parties (property_id, user_id, role, commission_percentage, is_primary, notes, assigned_by)
+         values ($1, $2, $3::property_party_role, $4, coalesce($5, false), $6, $7)
+         on conflict (property_id, user_id, role) do update
+            set commission_percentage = excluded.commission_percentage,
+                is_primary = excluded.is_primary,
+                notes = excluded.notes,
+                assigned_by = excluded.assigned_by
+         returning id`,
+        [
+            propertyId,
+            userId,
+            role,
+            commission,
+            input.isPrimary === true || input.isPrimary === 'true',
+            nullIfBlank(input.notes),
+            actor,
+        ]
+    );
+
+    // Keep the denormalised owner/organization columns in step with the
+    // primary landlord/agency so list screens need no extra joins.
+    if (role === 'landlord') {
+        await client.query('update properties set owner_id = $2 where id = $1 and owner_id is null', [propertyId, userId]);
+    }
+    if (role === 'agency') {
+        await client.query(
+            `update properties p
+                set organization_id = u.organization_id
+               from users u
+              where p.id = $1 and u.id = $2 and p.organization_id is null`,
+            [propertyId, userId]
+        );
+    }
+    return rows[0].id;
+}
+
+/** Replaces the whole amenity set — the UI edits amenities as a checklist. */
+export async function replaceAmenities(client, propertyId, amenityIds) {
+    if (!Array.isArray(amenityIds)) throw invalid('amenityIds must be an array');
+    await client.query('delete from property_amenities where property_id = $1', [propertyId]);
+    if (amenityIds.length > 0) {
+        await client.query(
+            `insert into property_amenities (property_id, amenity_id)
+             select $1, unnest($2::uuid[])`,
+            [propertyId, amenityIds]
+        );
+    }
+}
+
+export async function insertCharge(client, propertyId, input) {
+    const name = nullIfBlank(input.name);
+    if (!name) throw invalid('name is required');
+    const amount = numberOrNull(input.amount, 'amount');
+    if (amount === null) throw invalid('amount is required');
+
+    await client.query(
+        `insert into property_charges (property_id, name, amount, currency, frequency, is_mandatory, is_refundable, notes, sort_order)
+         values ($1, $2, $3, coalesce($4, 'TZS'), coalesce($5::charge_frequency, 'monthly'),
+                 coalesce($6, true), coalesce($7, false), $8, coalesce($9, 0))`,
+        [
+            propertyId,
+            name,
+            amount,
+            nullIfBlank(input.currency),
+            nullIfBlank(input.frequency),
+            input.isMandatory === undefined ? null : input.isMandatory === true || input.isMandatory === 'true',
+            input.isRefundable === undefined ? null : input.isRefundable === true || input.isRefundable === 'true',
+            nullIfBlank(input.notes),
+            numberOrNull(input.sortOrder, 'sortOrder'),
+        ]
+    );
+}
+
+/**
+ * Stores an already-WebP image plus its thumbnail. Conversion happens on the
+ * client (the portal's image pipeline, the app's compressor) so the server
+ * never needs an image-processing dependency; this only validates and
+ * persists.
+ *
+ * @returns {Promise<string>} the media row id
+ */
+export async function storeImage(client, storagePort, propertyId, {image, thumbnail, caption, isCover, width, height}) {
+    if (!image?.body?.length) throw invalid('An image file is required');
+    if (image.contentType !== 'image/webp') {
+        throw invalid('Images must be converted to WebP before upload');
+    }
+    if (thumbnail && thumbnail.contentType !== 'image/webp') {
+        throw invalid('Thumbnails must be WebP');
+    }
+
+    const storedImage = await storagePort.put({
+        name: image.name ?? `property-${propertyId}.webp`,
+        contentType: 'image/webp',
+        body: image.body,
+    });
+    const storedThumbnail = thumbnail
+        ? await storagePort.put({
+            name: thumbnail.name ?? `property-${propertyId}-thumb.webp`,
+            contentType: 'image/webp',
+            body: thumbnail.body,
+        })
+        : null;
+
+    const {rows} = await client.query(
+        `insert into property_media
+             (property_id, url, thumbnail_url, kind, content_type, size_bytes, width, height, caption, is_cover, position)
+         values ($1, $2, $3, 'photo', 'image/webp', $4, $5, $6, $7, coalesce($8, false),
+                 coalesce((select max(position) + 1 from property_media where property_id = $1), 0))
+         returning id`,
+        [
+            propertyId,
+            storedImage.key,
+            storedThumbnail?.key ?? null,
+            image.body.length,
+            numberOrNull(width, 'width'),
+            numberOrNull(height, 'height'),
+            nullIfBlank(caption),
+            isCover === true || isCover === 'true',
+        ]
+    );
+    return rows[0].id;
+}
+
 /**
  * The parts of a property that hang off it: who is attributed to it, which
  * amenities it has, what is charged alongside rent, its media, and which
@@ -47,52 +193,10 @@ export function createPropertyDetailsService({pool, storagePort}) {
      * admin correcting a mistake expects.
      */
     async function assignParty(propertyId, input, actor) {
-        const userId = nullIfBlank(input.userId);
-        const role = nullIfBlank(input.role);
-        if (!userId) throw invalid('userId is required');
-        if (!['landlord', 'broker', 'agency'].includes(role)) {
-            throw invalid('role must be one of: landlord, broker, agency');
-        }
-        const commission = numberOrNull(input.commissionPercentage, 'commissionPercentage');
-
         return withActor(pool, actor, async (client) => {
             await assertPropertyExists(client, propertyId);
-            const {rows} = await client.query(
-                `insert into property_parties (property_id, user_id, role, commission_percentage, is_primary, notes, assigned_by)
-                 values ($1, $2, $3::property_party_role, $4, coalesce($5, false), $6, $7)
-                 on conflict (property_id, user_id, role) do update
-                    set commission_percentage = excluded.commission_percentage,
-                        is_primary = excluded.is_primary,
-                        notes = excluded.notes,
-                        assigned_by = excluded.assigned_by
-                 returning id`,
-                [
-                    propertyId,
-                    userId,
-                    role,
-                    commission,
-                    input.isPrimary === true || input.isPrimary === 'true',
-                    nullIfBlank(input.notes),
-                    actor,
-                ]
-            );
-
-            // Keep the denormalised owner/organization columns in step with the
-            // primary landlord/agency so list screens need no extra joins.
-            if (role === 'landlord') {
-                await client.query('update properties set owner_id = $2 where id = $1 and owner_id is null', [propertyId, userId]);
-            }
-            if (role === 'agency') {
-                await client.query(
-                    `update properties p
-                        set organization_id = u.organization_id
-                       from users u
-                      where p.id = $1 and u.id = $2 and p.organization_id is null`,
-                    [propertyId, userId]
-                );
-            }
-
-            return {id: rows[0].id, ...(await listParties(propertyId, client))};
+            const id = await upsertParty(client, propertyId, input, actor);
+            return {id, ...(await listParties(propertyId, client))};
         });
     }
 
@@ -123,18 +227,9 @@ export function createPropertyDetailsService({pool, storagePort}) {
 
     /** Replaces the whole set — the UI edits amenities as a checklist. */
     async function setAmenities(propertyId, amenityIds, actor) {
-        if (!Array.isArray(amenityIds)) throw invalid('amenityIds must be an array');
-
         return withActor(pool, actor, async (client) => {
             await assertPropertyExists(client, propertyId);
-            await client.query('delete from property_amenities where property_id = $1', [propertyId]);
-            if (amenityIds.length > 0) {
-                await client.query(
-                    `insert into property_amenities (property_id, amenity_id)
-                     select $1, unnest($2::uuid[])`,
-                    [propertyId, amenityIds]
-                );
-            }
+            await replaceAmenities(client, propertyId, amenityIds);
             return listAmenities(propertyId, client);
         });
     }
@@ -153,29 +248,9 @@ export function createPropertyDetailsService({pool, storagePort}) {
     }
 
     async function addCharge(propertyId, input, actor) {
-        const name = nullIfBlank(input.name);
-        if (!name) throw invalid('name is required');
-        const amount = numberOrNull(input.amount, 'amount');
-        if (amount === null) throw invalid('amount is required');
-
         return withActor(pool, actor, async (client) => {
             await assertPropertyExists(client, propertyId);
-            await client.query(
-                `insert into property_charges (property_id, name, amount, currency, frequency, is_mandatory, is_refundable, notes, sort_order)
-                 values ($1, $2, $3, coalesce($4, 'TZS'), coalesce($5::charge_frequency, 'monthly'),
-                         coalesce($6, true), coalesce($7, false), $8, coalesce($9, 0))`,
-                [
-                    propertyId,
-                    name,
-                    amount,
-                    nullIfBlank(input.currency),
-                    nullIfBlank(input.frequency),
-                    input.isMandatory === undefined ? null : input.isMandatory === true || input.isMandatory === 'true',
-                    input.isRefundable === undefined ? null : input.isRefundable === true || input.isRefundable === 'true',
-                    nullIfBlank(input.notes),
-                    numberOrNull(input.sortOrder, 'sortOrder'),
-                ]
-            );
+            await insertCharge(client, propertyId, input);
             return listCharges(propertyId, client);
         });
     }
@@ -209,50 +284,11 @@ export function createPropertyDetailsService({pool, storagePort}) {
      * the browser (see the portal's image pipeline) so the server never needs
      * an image-processing dependency; this only validates and persists.
      */
-    async function addImage(propertyId, {image, thumbnail, caption, isCover, width, height}, actor) {
-        if (!image?.body?.length) throw invalid('An image file is required');
-        if (image.contentType !== 'image/webp') {
-            throw invalid('Images must be converted to WebP before upload');
-        }
-        if (thumbnail && thumbnail.contentType !== 'image/webp') {
-            throw invalid('Thumbnails must be WebP');
-        }
-
+    async function addImage(propertyId, input, actor) {
         return withActor(pool, actor, async (client) => {
             await assertPropertyExists(client, propertyId);
-
-            const storedImage = await storagePort.put({
-                name: image.name ?? `property-${propertyId}.webp`,
-                contentType: 'image/webp',
-                body: image.body,
-            });
-            const storedThumbnail = thumbnail
-                ? await storagePort.put({
-                    name: thumbnail.name ?? `property-${propertyId}-thumb.webp`,
-                    contentType: 'image/webp',
-                    body: thumbnail.body,
-                })
-                : null;
-
-            const {rows} = await client.query(
-                `insert into property_media
-                     (property_id, url, thumbnail_url, kind, content_type, size_bytes, width, height, caption, is_cover, position)
-                 values ($1, $2, $3, 'photo', 'image/webp', $4, $5, $6, $7, coalesce($8, false),
-                         coalesce((select max(position) + 1 from property_media where property_id = $1), 0))
-                 returning id`,
-                [
-                    propertyId,
-                    storedImage.key,
-                    storedThumbnail?.key ?? null,
-                    image.body.length,
-                    numberOrNull(width, 'width'),
-                    numberOrNull(height, 'height'),
-                    nullIfBlank(caption),
-                    isCover === true || isCover === 'true',
-                ]
-            );
-
-            return {id: rows[0].id, ...(await listMedia(propertyId, client))};
+            const id = await storeImage(client, storagePort, propertyId, input);
+            return {id, ...(await listMedia(propertyId, client))};
         });
     }
 
