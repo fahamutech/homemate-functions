@@ -1,11 +1,12 @@
 import {withActor, query, toPage, pageParams, nullIfBlank, updateById} from '../../shared/db.mjs';
-import {notFound, invalid} from '../../shared/errors.mjs';
-import {PLATFORM_ROLES, STAFF_ROLES, readRolesForUsers} from '../../shared/roles.mjs';
+import {notFound, invalid, DomainError, ErrorCodes} from '../../shared/errors.mjs';
+import {PLATFORM_ROLES, STAFF_ROLES, PARTNER_ROLES, readRolesForUsers} from '../../shared/roles.mjs';
 import {publicRole} from '../../shared/active-role.mjs';
 import {hashPassword, generateInitialPassword} from '../../shared/passwords.mjs';
 
 export {PLATFORM_ROLES, STAFF_ROLES};
 const ALL_ROLES = [...PLATFORM_ROLES, ...STAFF_ROLES];
+const PARTNER_ROLE_STATUSES = ['invited', 'applied', 'pending_review', 'active', 'action_needed', 'rejected', 'suspended'];
 
 const UPDATABLE_FIELDS = [
     'full_name', 'email', 'phone_number', 'job_title', 'role', 'organization_id', 'allowed_routes',
@@ -42,6 +43,7 @@ async function withRoles(db, userRows) {
  */
 export function createUsersService({pool}) {
     async function search(filters = {}) {
+        if (nullIfBlank(filters.partnerRole)) return searchByPartnerRole(filters);
         const {limit, offset} = pageParams(filters);
         const {rows} = await query(
             pool,
@@ -60,6 +62,84 @@ export function createUsersService({pool}) {
         );
         const page = toPage(rows, {limit, offset});
         return {...page, items: await withRoles(pool, page.items)};
+    }
+
+    /**
+     * People by their T01 role rather than users.role — what the listing form's
+     * broker and landlord pickers need (T08): `partnerRole` plus a
+     * comma-separated `partnerStatus` (default: active).
+     */
+    async function searchByPartnerRole(filters) {
+        const role = nullIfBlank(filters.partnerRole);
+        if (!PARTNER_ROLES.includes(role)) throw invalid(`partnerRole must be one of: ${PARTNER_ROLES.join(', ')}`);
+        const statuses = `${nullIfBlank(filters.partnerStatus) ?? 'active'}`.split(',').map((s) => s.trim()).filter(Boolean);
+        const bad = statuses.find((status) => !PARTNER_ROLE_STATUSES.includes(status));
+        if (bad) throw invalid(`partnerStatus must be among: ${PARTNER_ROLE_STATUSES.join(', ')}`);
+        const {limit, offset} = pageParams(filters);
+
+        const {rows} = await query(
+            pool,
+            `select v.*, count(*) over () as total_count
+               from v_users v
+               join user_roles ur on ur.user_id = v.id and ur.role = $1::user_role
+                                 and ur.status = any ($2::partner_role_status[])
+              where ($3::text is null
+                     or v.full_name ilike '%' || $3 || '%'
+                     or v.phone_number ilike '%' || $3 || '%'
+                     or v.email ilike '%' || $3 || '%')
+              order by v.full_name nulls last
+              limit $4 offset $5`,
+            [role, statuses, nullIfBlank(filters.query), limit, offset]
+        );
+        const page = toPage(rows, {limit, offset});
+        return {...page, items: await withRoles(pool, page.items)};
+    }
+
+    /**
+     * Suspends or reactivates a person's broker or landlord role (T08). Only
+     * active ↔ suspended: applying, approving and rejecting belong to the
+     * partner applications queue. Audited as the staff member (withActor),
+     * and the person is told.
+     */
+    async function changeRoleStatus(userId, role, {status, reason} = {}, actor) {
+        if (!PARTNER_ROLES.includes(role)) throw invalid(`role must be one of: ${PARTNER_ROLES.join(', ')}`);
+        const next = nullIfBlank(status);
+        if (!['active', 'suspended'].includes(next)) throw invalid('status must be active or suspended');
+        const why = nullIfBlank(reason);
+        if (next === 'suspended' && !why) throw invalid('Give a reason for suspending this role');
+
+        return withActor(pool, actor, async (client) => {
+            const {rows} = await client.query(
+                'select status from user_roles where user_id = $1 and role = $2 for update',
+                [userId, role]
+            );
+            if (rows.length === 0) throw notFound(`A ${role} role for that user`);
+            const from = next === 'suspended' ? 'active' : 'suspended';
+            if (rows[0].status !== from) {
+                throw new DomainError(
+                    ErrorCodes.CONFLICT,
+                    `Only an ${from} ${role} role can be ${next === 'suspended' ? 'suspended' : 'reactivated'} (this one is ${rows[0].status})`,
+                    409
+                );
+            }
+            await client.query(
+                `update user_roles set status = $3::partner_role_status, suspension_reason = $4
+                  where user_id = $1 and role = $2`,
+                [userId, role, next, next === 'suspended' ? why : null]
+            );
+            await client.query(
+                `insert into notifications (user_id, kind, title, body, subject_table, subject_id)
+                 values ($1, 'kyc_update', $2, $3, 'user_roles', $1)`,
+                [
+                    userId,
+                    next === 'suspended' ? `Your ${role} role is paused` : `Your ${role} role is active again`,
+                    next === 'suspended' ? why : `You can use your ${role} workspace again.`,
+                ]
+            );
+            const {rows: fresh} = await client.query('select * from v_users where id = $1', [userId]);
+            const [user] = await withRoles(client, fresh);
+            return user;
+        });
     }
 
     async function getById(id) {
@@ -171,5 +251,5 @@ export function createUsersService({pool}) {
         });
     }
 
-    return {search, getById, create, update, changeStatus};
+    return {search, getById, create, update, changeStatus, changeRoleStatus};
 }

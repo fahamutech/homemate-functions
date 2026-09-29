@@ -174,7 +174,7 @@ export function createPropertyDetailsService({pool, storagePort}) {
         const {rows} = await query(
             executor,
             `select pp.id, pp.role, pp.commission_percentage, pp.is_primary, pp.notes,
-                    pp.assigned_by, pp.assigned_at,
+                    pp.assigned_by, pp.assigned_at, pp.confirmation_status, pp.confirmed_at, pp.dispute_reason,
                     u.id as user_id, u.full_name, u.phone_number, u.email, u.role as user_role,
                     o.name as organization_name
                from property_parties pp

@@ -70,6 +70,15 @@ export const adminUpdateUser = route({
     handler: (request) => adminConsole.users.update(request.params.id, request.body ?? {}, actorOf(request)),
 });
 
+export const adminChangeUserRoleStatus = route({
+    method: 'post',
+    path: '/admin/users/:id/roles/:role/status',
+    description: 'Suspend (with a reason) or reactivate a person’s broker or landlord role',
+    requestSample: {status: 'suspended', reason: 'Listings reported as fake'},
+    handler: (request) =>
+        adminConsole.users.changeRoleStatus(request.params.id, request.params.role, request.body ?? {}, actorOf(request)),
+});
+
 export const adminChangeUserStatus = route({
     method: 'post',
     path: '/admin/users/:id/status',

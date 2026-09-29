@@ -1,5 +1,7 @@
 import {withActor, query, nullIfBlank} from '../../shared/db.mjs';
 import {notFound, invalid} from '../../shared/errors.mjs';
+import {readRolesForUsers} from '../../shared/roles.mjs';
+import {publicRole} from '../../shared/active-role.mjs';
 
 /**
  * KYC — the identity evidence HomeMate holds on the people who transact, and
@@ -56,7 +58,7 @@ export function createKycService({pool, storagePort}) {
         const {rows} = await query(pool, 'select * from v_users where id = $1', [userId]);
         if (rows.length === 0) throw notFound('User');
 
-        const [documents, remediations] = await Promise.all([
+        const [documents, remediations, roles] = await Promise.all([
             query(
                 pool,
                 `select id, document_type, status, thumbnail_key is not null as has_thumbnail,
@@ -74,9 +76,15 @@ export function createKycService({pool, storagePort}) {
                    from kyc_remediations where user_id = $1 order by resolved, created_at desc`,
                 [userId]
             ),
+            readRolesForUsers(pool, [userId]),
         ]);
 
-        return {...rows[0], documents: documents.rows, remediations: remediations.rows};
+        return {
+            ...rows[0],
+            roles: (roles.get(userId) ?? []).map(publicRole),
+            documents: documents.rows,
+            remediations: remediations.rows,
+        };
     }
 
     /**
