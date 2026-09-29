@@ -1,5 +1,5 @@
 import {invalid} from '../../shared/errors.mjs';
-import {tenantFee} from '../../shared/fees.mjs';
+import {firstPayment, tenantFee} from '../../shared/fees.mjs';
 import {mediaUrl} from './listing-view.mjs';
 
 /** The partner app's enquiry tabs (BRK-040) → inquiry statuses. */
@@ -86,6 +86,42 @@ export function earningPreview({role, rent, settings, hasBroker, booking = null}
         platformAmount,
         yourShare: earnsFee ? agentShare : 0,
         rentGoesTo: 'landlord',
+    };
+}
+
+/**
+ * BRK-042 "What the customer pays": what the booking charged once there is
+ * one, else the checkout formula on the listing's terms.
+ */
+export function paymentPreview({booking = null, terms = null, settings}) {
+    if (booking) {
+        const deposit = Number(booking.deposit_amount ?? 0);
+        const fee = Number(booking.service_fee ?? 0);
+        const total = Number(booking.total_due);
+        const advanceMonths = Number(booking.advance_months ?? 0);
+        const firstRent = round2(total - deposit - fee);
+        return {
+            basis: 'booking',
+            firstRent,
+            deposit,
+            advance: advanceMonths > 0 ? firstRent : 0,
+            tenantFee: fee,
+            tenantFeePercentage: Number(booking.service_fee_percentage ?? 0),
+            total,
+        };
+    }
+    const payment = firstPayment(
+        {rent: terms?.price, depositMonths: terms?.deposit_months, advanceMonths: terms?.advance_rent_months},
+        settings
+    );
+    return {
+        basis: 'listing_price',
+        firstRent: payment.firstRent,
+        deposit: payment.deposit,
+        advance: payment.advance,
+        tenantFee: payment.fee.amount,
+        tenantFeePercentage: payment.fee.percentage,
+        total: payment.total,
     };
 }
 

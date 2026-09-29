@@ -256,6 +256,16 @@ describe('partner enquiries and landlord tenancies (Postgres integration)', () =
                 yourShare: 450000,
                 rentGoesTo: 'landlord',
             });
+            // BRK-042 "What the customer pays", the checkout formula on the listing.
+            assert.deepEqual(tracker.payment, {
+                basis: 'listing_price',
+                firstRent: 1000000,
+                deposit: 1000000,
+                advance: 0,
+                tenantFee: 500000,
+                tenantFeePercentage: 50,
+                total: 2500000,
+            });
 
             await enquiries.respond(broker, 'broker', inquiry.id, {status: 'accepted', response: 'Welcome'});
             tracker = await enquiries.journey(broker, 'broker', inquiry.id);
@@ -272,6 +282,8 @@ describe('partner enquiries and landlord tenancies (Postgres integration)', () =
             assert.equal(state('moved_in'), 'current');
             assert.equal(tracker.earning.basis, 'booking');
             assert.equal(tracker.earning.yourShare, 450000);
+            assert.equal(tracker.payment.basis, 'booking');
+            assert.equal(tracker.payment.total, 2500000, 'what was actually charged');
 
             const landlordView = await enquiries.journey(landlord, 'landlord', inquiry.id);
             assert.equal(landlordView.earning.yourShare, 0, 'the broker earns the fee on a brokered home');

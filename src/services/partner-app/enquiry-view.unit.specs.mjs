@@ -1,6 +1,6 @@
 import {test, describe} from 'node:test';
 import assert from 'node:assert/strict';
-import {readInquiryFilter, toPartnerInquiry, earningPreview, readTenancyStage, readDay} from './enquiry-view.mjs';
+import {readInquiryFilter, toPartnerInquiry, earningPreview, readTenancyStage, readDay, paymentPreview} from './enquiry-view.mjs';
 
 describe('readInquiryFilter', () => {
     test('the app’s tabs map onto inquiry statuses', () => {
@@ -116,5 +116,34 @@ describe('readTenancyStage and readDay', () => {
         for (const bad of [undefined, '', '01/10/2026', '2026-13-01']) {
             assert.throws(() => readDay(bad, 'date'), (error) => error.code === 'VALIDATION_FAILED' && /date/.test(error.message));
         }
+    });
+});
+
+describe('paymentPreview', () => {
+    const settings = {tenantFeePercentage: 50, platformPercentage: 10};
+
+    test('before a booking: the checkout formula on the listing terms', () => {
+        assert.deepEqual(paymentPreview({terms: {price: '800000', deposit_months: '2', advance_rent_months: '0'}, settings}), {
+            basis: 'listing_price',
+            firstRent: 800000,
+            deposit: 1600000,
+            advance: 0,
+            tenantFee: 400000,
+            tenantFeePercentage: 50,
+            total: 2800000,
+        });
+    });
+
+    test('with a booking: what it actually charged, whatever the settings say now', () => {
+        const booking = {deposit_amount: '800000', service_fee: '300000', service_fee_percentage: '37.5', advance_months: 3, total_due: '3500000'};
+        assert.deepEqual(paymentPreview({booking, settings}), {
+            basis: 'booking',
+            firstRent: 2400000,
+            deposit: 800000,
+            advance: 2400000,
+            tenantFee: 300000,
+            tenantFeePercentage: 37.5,
+            total: 3500000,
+        });
     });
 });

@@ -1,6 +1,6 @@
 import {test, describe} from 'node:test';
 import assert from 'node:assert/strict';
-import {toApplicationView, STEP_ORDER} from './application-view.mjs';
+import {toApplicationView, STEP_ORDER, earningExample} from './application-view.mjs';
 
 /**
  * The application as the app shows it: which steps are done, what is next,
@@ -84,5 +84,22 @@ describe('toApplicationView', () => {
         assert.equal(view.currentAgreementVersion, 'v1.0');
         assert.equal(view.appliedAt, '2026-09-28T10:00:00Z');
         assert.equal(view.identityVerified, false);
+    });
+});
+
+describe('earningExample', () => {
+    test('the fee on the sample rent, less HomeMate’s share', () => {
+        assert.deepEqual(earningExample({tenantFeePercentage: 50, platformPercentage: 10}), {
+            rent: 1200000,
+            tenantFee: 600000,
+            tenantFeePercentage: 50,
+            platformAmount: 60000,
+            platformPercentage: 10,
+            youReceive: 540000,
+        });
+    });
+
+    test('follows the settings', () => {
+        assert.equal(earningExample({tenantFeePercentage: 40, platformPercentage: 20}, 1000000).youReceive, 320000);
     });
 });

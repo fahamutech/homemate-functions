@@ -2,7 +2,7 @@ import {query} from '../../shared/db.mjs';
 import {DomainError, ErrorCodes, invalid, notFound} from '../../shared/errors.mjs';
 import {PARTNER_ROLES} from '../../shared/roles.mjs';
 import {loadFeeSettings} from '../../shared/fees.mjs';
-import {readInquiryFilter, toPartnerInquiry, earningPreview} from './enquiry-view.mjs';
+import {readInquiryFilter, toPartnerInquiry, earningPreview, paymentPreview} from './enquiry-view.mjs';
 
 /**
  * Enquiries on a partner's listings (T05, BRK-040–042).
@@ -51,16 +51,18 @@ export function createPartnerEnquiriesService({pool, customerOps}) {
     /** BRK-042: the steps and dates, and what this partner stands to earn. */
     async function journey(userId, role, id) {
         const row = await load(userId, role, id);
-        const [{rows: steps}, {rows: booking}, settings] = await Promise.all([
+        const [{rows: steps}, {rows: booking}, settings, {rows: terms}] = await Promise.all([
             query(pool, 'select partner_inquiry_journey($1) as steps', [id]),
             query(
                 pool,
-                `select monthly_rent, service_fee, platform_fee_percentage from bookings
+                `select monthly_rent, service_fee, service_fee_percentage, platform_fee_percentage,
+                        deposit_amount, advance_months, total_due from bookings
                   where inquiry_id = $1 and status not in ('cancelled', 'expired')
                   order by created_at desc limit 1`,
                 [id]
             ),
             loadFeeSettings(pool),
+            query(pool, 'select price, deposit_months, advance_rent_months from properties where id = $1', [row.property_id]),
         ]);
         return {
             inquiry: toPartnerInquiry(row, {canAnswer: row.can_answer}),
@@ -72,6 +74,7 @@ export function createPartnerEnquiriesService({pool, customerOps}) {
                 hasBroker: Boolean(row.broker_user_id),
                 booking: booking[0] ?? null,
             }),
+            payment: paymentPreview({booking: booking[0] ?? null, terms: terms[0], settings}),
         };
     }
 
