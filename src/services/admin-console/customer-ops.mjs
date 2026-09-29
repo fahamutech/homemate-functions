@@ -19,6 +19,22 @@ import {notFound, invalid} from '../../shared/errors.mjs';
 /** confirmed → active, active → completed; the database enforces the order. */
 const TENANCY_MOVES = ['active', 'completed'];
 
+const HISTORY_LABELS = {
+    pending: 'Reserved',
+    awaiting_payment: 'Awaiting payment',
+    confirmed: 'Payment verified',
+    active: 'Moved in',
+    completed: 'Ended',
+    cancelled: 'Cancelled',
+    expired: 'Expired',
+};
+
+function historyLabel({status, by_landlord: byLandlord}) {
+    if (byLandlord && status === 'active') return 'Confirmed by landlord';
+    if (byLandlord && status === 'completed') return 'Ended by landlord';
+    return HISTORY_LABELS[status] ?? status;
+}
+
 export function createCustomerOpsService({pool}) {
     // --- inquiries -----------------------------------------------------------
 
@@ -103,12 +119,17 @@ export function createCustomerOpsService({pool}) {
     async function getBooking(id) {
         const {rows} = await query(pool, 'select * from v_bookings where id = $1', [id]);
         if (rows.length === 0) throw notFound('Booking');
-        const {rows: payments} = await query(
-            pool,
-            'select * from v_customer_payments where booking_id = $1 order by created_at',
-            [id]
-        );
-        return {...rows[0], payments};
+        const [{rows: payments}, {rows: history}] = await Promise.all([
+            query(pool, 'select * from v_customer_payments where booking_id = $1 order by created_at', [id]),
+            query(pool, 'select booking_status_history($1) as items', [id]),
+        ]);
+        return {
+            ...rows[0],
+            payments,
+            // Each status change, and whether the home's landlord made it (T05)
+            // rather than staff — the portal shows "Confirmed by landlord".
+            history: (history[0].items ?? []).map((entry) => ({...entry, label: historyLabel(entry)})),
+        };
     }
 
     /**

@@ -185,6 +185,36 @@ export async function patchProperty(client, id, patch) {
 }
 
 /**
+ * Adds who listed each home (broker / landlord in the app, or the backoffice)
+ * and where its landlord's confirmation stands (v_property_listing_meta, 032).
+ */
+async function withListingMeta(db, rows) {
+    if (rows.length === 0) return rows;
+    const {rows: meta} = await query(
+        db,
+        'select * from v_property_listing_meta where property_id = any($1::uuid[])',
+        [rows.map((row) => row.id)]
+    );
+    const byId = new Map(meta.map((m) => [m.property_id, m]));
+    return rows.map((row) => {
+        const m = byId.get(row.id);
+        return {
+            ...row,
+            listed_by: {
+                kind: m?.listed_by_kind ?? 'backoffice',
+                user_id: m?.listed_by_user_id ?? null,
+                name: m?.listed_by_name ?? null,
+            },
+            landlord_confirmation: {
+                status: m?.landlord_confirmation_status ?? 'not_required',
+                reason: m?.landlord_dispute_reason ?? null,
+                confirmed_at: m?.landlord_confirmed_at ?? null,
+            },
+        };
+    });
+}
+
+/**
  * Property registry + moderation queue. Search (text, facets and PostGIS
  * radius) is a single SQL function; approval/rejection is a status transition
  * the database validates and stamps.
@@ -222,7 +252,8 @@ export function createPropertiesService({pool}) {
                 offset,
             ]
         );
-        return toPage(rows, {limit, offset});
+        const page = toPage(rows, {limit, offset});
+        return {...page, items: await withListingMeta(pool, page.items)};
     }
 
     /**
@@ -246,7 +277,7 @@ export function createPropertiesService({pool}) {
                                 charge_monthly_equivalent(amount, frequency) as monthly_equivalent
                            from property_charges where property_id = $1 order by sort_order, name`, [id]),
             query(pool, `select pp.id, pp.role, pp.commission_percentage, pp.is_primary, pp.assigned_by,
-                                pp.assigned_at, u.id as user_id, u.full_name, u.phone_number, u.email,
+                                pp.assigned_at, pp.confirmation_status, pp.confirmed_at, pp.dispute_reason, u.id as user_id, u.full_name, u.phone_number, u.email,
                                 u.role as user_role
                            from property_parties pp join users u on u.id = pp.user_id
                           where pp.property_id = $1 order by pp.role, pp.is_primary desc`, [id]),
@@ -255,8 +286,9 @@ export function createPropertiesService({pool}) {
                           where ppm.property_id = $1 order by pm.sort_order`, [id]),
         ]);
 
+        const [record] = await withListingMeta(pool, rows);
         return {
-            ...rows[0],
+            ...record,
             media: media.rows,
             amenities: amenities.rows,
             charges: charges.rows,
