@@ -6,3 +6,21 @@ logs
 .env.test
 .env.*.local
 .DS_Store
+
+# Secrets. This repository is public: anything committed is published, and
+# deleting it later does not take it back. Keep credentials in GitHub Actions
+# secrets or in local files these patterns cover. CI runs gitleaks as well
+# (.github/workflows/secret-scan.yml).
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+key.properties
+google-services.json
+GoogleService-Info.plist
+*service-account*.json
+*-adminsdk-*.json

@@ -1,0 +1,8 @@
+# gitleaks configuration, read by .github/workflows/secret-scan.yml.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "The character set temporary passwords are drawn from, not a key"
+paths = ['''^src/shared/passwords\.mjs$''']
+regexes = ['''PASSWORD_ALPHABET''']
