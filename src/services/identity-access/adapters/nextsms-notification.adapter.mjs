@@ -18,10 +18,8 @@ const TEMPLATES = {
             : `${code} is your HomeMate verification code. It expires in 5 minutes. Do not share it.`,
     'booking-confirmed': ({reference, property}) =>
         `Your HomeMate booking ${reference} for ${property} is confirmed.`,
-    'payment-received': ({reference, amount, currency, property}) =>
-        `HomeMate: we received your payment of ${money(amount, currency)}${property ? ` for ${property}` : ''}. Ref ${reference}. Thank you.`,
-    'payout-sent': ({reference, amount, currency}) =>
-        `HomeMate: we sent you ${money(amount, currency)}. Ref ${reference}.`,
+    'payment-received': ({reference, amount, currency}) =>
+        `HomeMate received your payment ${reference} of ${currency} ${amount}. Thank you.`,
     'landlord-confirm-listing': ({broker, title, webLink}) =>
         `HomeMate: ${broker ?? 'A broker'} listed "${title}" as your home. Confirm or dispute it: ${webLink}`,
     'partner-application-decision': ({decision, role, reason, text}) =>
@@ -31,13 +29,6 @@ const TEMPLATES = {
               ? `HomeMate: your ${role} application was not approved. Reason: ${reason}`
               : `HomeMate: your ${role} application needs a change. ${text ?? ''} Open the app to fix it.`,
 };
-
-/** "TZS 1,500,000", as the app writes it. */
-function money(amount, currency) {
-    const value = Number(amount);
-    const shown = Number.isFinite(value) ? value.toLocaleString('en-US', {maximumFractionDigits: 2}) : amount;
-    return `${currency ?? 'TZS'} ${shown}`;
-}
 
 /** Provider status group 1/3 is pending, 20/DELIVERY is delivered, else rejected. */
 function normaliseStatus(status) {
@@ -70,10 +61,12 @@ export function createNextSmsAdapter({
         throw new Error('SMS_USERNAME and SMS_PASSWORD are required for the nextsms provider');
     }
 
+    console.log(`${username}:${password}`)
     const rawBase64 = Buffer.from(`${username}:${password}`).toString('base64');
     // Regex to split into 76-character chunks joined by CRLF
     const rfc2045Base64 = rawBase64.match(/.{1,76}/g).join('\r\n');
     const authorization = `Basic ${rfc2045Base64}`;
+    console.log(authorization)
     const sendPath = testMode ? '/api/sms/v1/test/text/single' : '/api/sms/v1/text/single';
 
     async function call(path, {method = 'GET', body} = {}) {
