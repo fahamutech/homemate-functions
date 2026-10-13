@@ -321,6 +321,10 @@ export function createKycService({pool, storagePort}) {
                     actor ?? null,
                 ]
             );
+            await client.query(
+                `select notify_user($1, 'kyc_update', 'Action needed on your ID', $2, 'users', $1)`,
+                [userId, nullIfBlank(requestedAction)]
+            );
             return rows[0];
         });
     }

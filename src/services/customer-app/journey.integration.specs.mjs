@@ -550,11 +550,13 @@ describe('customer journey (Postgres integration)', () => {
             assert.equal(nudged.nudge_count, 1);
             assert.ok(nudged.last_nudged_at);
 
+            // The enquiry itself told them too (034); this counts the reminder.
             const {rows} = await pool.query(
-                'select count(*)::int as sent from notifications where user_id = $1',
+                `select audience from notifications where user_id = $1 and title = 'Reminder: an enquiry is waiting'`,
                 [landlord]
             );
-            assert.equal(rows[0].sent, 1);
+            assert.equal(rows.length, 1);
+            assert.equal(rows[0].audience, 'landlord', 'the reminder belongs in the landlord inbox');
         });
 
         test('will not let the same landlord be poked twice in a day', async () => {
