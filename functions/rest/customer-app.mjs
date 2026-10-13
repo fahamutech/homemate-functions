@@ -5,6 +5,7 @@ import {
     customerGeocoding,
     storagePort,
 } from '../../src/services/customer-app/container.mjs';
+import {pushDevices} from '../../src/services/notifications/container.mjs';
 import {route} from '../../src/shared/http.mjs';
 import {decodeUpload} from '../../src/shared/uploads.mjs';
 import {invalid} from '../../src/shared/errors.mjs';
@@ -210,8 +211,15 @@ export const appSavePreferences = route({
 export const appListNotifications = route({
     method: 'get',
     path: '/app/notifications',
-    description: 'The notification feed',
+    description: 'The notification feed; `audience` (customer, broker or landlord) narrows it to one role’s inbox',
     handler: (request) => customerApp.listNotifications(me(request), request.query),
+});
+
+export const appUnreadNotifications = route({
+    method: 'get',
+    path: '/app/notifications/unread-count',
+    description: 'How many notifications are unread, for one role’s inbox when `audience` is given',
+    handler: (request) => customerApp.unreadNotificationCount(me(request), request.query ?? {}),
 });
 
 export const appReadNotification = route({
@@ -224,8 +232,25 @@ export const appReadNotification = route({
 export const appReadAllNotifications = route({
     method: 'post',
     path: '/app/notifications/read-all',
-    description: 'Mark every notification read',
-    handler: (request) => customerApp.markAllNotificationsRead(me(request)),
+    description: 'Mark every notification read, or every one in one role’s inbox when `audience` is given',
+    handler: (request) =>
+        customerApp.markAllNotificationsRead(me(request), {audience: request.body?.audience ?? request.query?.audience}),
+});
+
+export const appRegisterDevice = route({
+    method: 'post',
+    path: '/app/devices',
+    description: 'Register this install’s FCM token so the signed-in person gets push notifications',
+    requestSample: {token: 'fcm-registration-token', platform: 'android', appVersion: '1.4.0+5'},
+    handler: (request) => pushDevices.register(me(request), request.body ?? {}),
+});
+
+export const appUnregisterDevice = route({
+    method: 'post',
+    path: '/app/devices/remove',
+    description: 'Stop pushing to this install, on sign-out',
+    requestSample: {token: 'fcm-registration-token'},
+    handler: (request) => pushDevices.unregister(me(request), request.body ?? {}),
 });
 
 export const appActivitySummary = route({
