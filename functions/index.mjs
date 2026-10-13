@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import {migrate} from '../migrations/run.mjs';
-import {pushOutbox} from '../src/services/notifications/container.mjs';
 
 /**
  * The server brings its own database up to date before it takes traffic, so
@@ -29,5 +28,11 @@ if (process.env.DATABASE_URL && process.env.AUTO_MIGRATE !== 'false') {
  * PUSH_LISTEN=false leaves it to the per-minute sweep (functions/schedule).
  */
 if (process.env.DATABASE_URL && process.env.PUSH_LISTEN !== 'false') {
-    pushOutbox.listen();
+    // Loaded here, after the migrations, and never allowed to stop the server.
+    try {
+        const {pushOutbox} = await import('../src/services/notifications/container.mjs');
+        pushOutbox.listen();
+    } catch (error) {
+        console.error('[push] could not start the notification listener:', error);
+    }
 }
