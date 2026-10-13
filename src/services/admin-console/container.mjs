@@ -11,6 +11,7 @@ import {createCustomerOpsService} from './customer-ops.mjs';
 import {createSettingsService} from './settings.mjs';
 import {createInsightsService} from './insights.mjs';
 import {storagePort} from '../storage/container.mjs';
+import {smsOutbox} from '../notifications/container.mjs';
 import {createSandboxPaymentAdapter} from '../payments/adapters/sandbox-payment.adapter.mjs';
 import {createNominatimAdapter} from '../geocoding/adapters/nominatim.adapter.mjs';
 
@@ -38,7 +39,7 @@ export const adminConsole = {
     paymentMethods: createPaymentMethodsService({pool, paymentPorts}),
     dictionaries: createDictionariesService({pool}),
     kyc: createKycService({pool, storagePort}),
-    money: createMoneyService({pool, paymentPorts}),
+    money: createMoneyService({pool, paymentPorts, smsOutbox}),
     customerOps: createCustomerOpsService({pool}),
     settings: createSettingsService({pool}),
     insights: createInsightsService({pool}),
