@@ -18,16 +18,6 @@ import {loadFeeSettings, tenantFee} from '../../shared/fees.mjs';
  */
 
 const CONTACT_PREFERENCES = ['phone', 'sms', 'whatsapp', 'email', 'in_app'];
-const NOTIFICATION_AUDIENCES = ['customer', 'broker', 'landlord'];
-
-function readAudience(value) {
-    const audience = nullIfBlank(value);
-    if (audience === null || audience === undefined) return null;
-    if (!NOTIFICATION_AUDIENCES.includes(audience)) {
-        throw invalid(`audience must be one of: ${NOTIFICATION_AUDIENCES.join(', ')}`);
-    }
-    return audience;
-}
 
 export function createCustomerAppService({pool}) {
     // --- discovery -----------------------------------------------------------
@@ -422,11 +412,6 @@ export function createCustomerAppService({pool}) {
         });
     }
 
-    /**
-     * The inbox for the role the app is in: that role's notifications plus the
-     * ones about the account itself (audience null, migration 034). Without an
-     * audience — app versions from before roles — everything.
-     */
     async function listNotifications(customerId, filters = {}) {
         const {limit, offset} = pageParams(filters);
         const {rows} = await query(
@@ -435,25 +420,11 @@ export function createCustomerAppService({pool}) {
                from notifications
               where user_id = $1
                 and ($2::boolean is not true or read_at is null)
-                and ($5::text is null or audience is null or audience = $5)
               order by created_at desc
               limit $3 offset $4`,
-            [customerId, filters.unreadOnly === true || filters.unreadOnly === 'true', limit, offset,
-                readAudience(filters.audience)]
+            [customerId, filters.unreadOnly === true || filters.unreadOnly === 'true', limit, offset]
         );
         return toPage(rows, {limit, offset});
-    }
-
-    /** The bell's badge, for one role's inbox. */
-    async function unreadNotificationCount(customerId, {audience} = {}) {
-        const {rows} = await query(
-            pool,
-            `select count(*)::int as unread from notifications
-              where user_id = $1 and read_at is null
-                and ($2::text is null or audience is null or audience = $2)`,
-            [customerId, readAudience(audience)]
-        );
-        return {unread: rows[0].unread};
     }
 
     async function markNotificationRead(customerId, id) {
@@ -466,26 +437,19 @@ export function createCustomerAppService({pool}) {
         return rows[0];
     }
 
-    /** "Mark all read" clears the inbox on screen, not the other roles' ones. */
-    async function markAllNotificationsRead(customerId, {audience} = {}) {
+    async function markAllNotificationsRead(customerId) {
         const {rowCount} = await query(
             pool,
-            `update notifications set read_at = now()
-              where user_id = $1 and read_at is null
-                and ($2::text is null or audience is null or audience = $2)`,
-            [customerId, readAudience(audience)]
+            'update notifications set read_at = now() where user_id = $1 and read_at is null',
+            [customerId]
         );
         return {updated: rowCount};
     }
 
     /** The counts the app's home and profile screens badge with. */
     async function activitySummary(customerId) {
-        const [{rows}, {unread}] = await Promise.all([
-            query(pool, 'select customer_activity_summary($1) as summary', [customerId]),
-            unreadNotificationCount(customerId, {audience: 'customer'}),
-        ]);
-        // The customer home's bell counts the customer inbox, not a broker's enquiries.
-        return {...rows[0].summary, unreadNotifications: unread};
+        const {rows} = await query(pool, 'select customer_activity_summary($1) as summary', [customerId]);
+        return rows[0].summary;
     }
 
     return {
@@ -505,7 +469,6 @@ export function createCustomerAppService({pool}) {
         getPreferences,
         savePreferences,
         listNotifications,
-        unreadNotificationCount,
         markNotificationRead,
         markAllNotificationsRead,
         activitySummary,

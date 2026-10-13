@@ -25,18 +25,7 @@ const BENEFICIARY_ROLE_COLUMN = {
     agency: 'agency',
 };
 
-/**
- * `smsOutbox` is optional: settling a payment or a payout queues its SMS in the
- * database (034), and draining straight after commit sends it now rather than
- * at the next sweep (functions/schedule).
- */
-export function createMoneyService({pool, paymentPorts = {}, smsOutbox = null}) {
-    /** After a commit that may have queued a text. Never delays or fails the caller. */
-    const sendQueuedSms = (result) => {
-        smsOutbox?.drainSoon();
-        return result;
-    };
-
+export function createMoneyService({pool, paymentPorts = {}}) {
     // --- collection ----------------------------------------------------------
 
     async function searchPayments(filters = {}) {
@@ -196,7 +185,7 @@ export function createMoneyService({pool, paymentPorts = {}, smsOutbox = null}) 
                 );
             }
             return {id: paymentId};
-        }).then(sendQueuedSms).then(() => getPayment(paymentId));
+        }).then(() => getPayment(paymentId));
     }
 
     /**
@@ -223,7 +212,7 @@ export function createMoneyService({pool, paymentPorts = {}, smsOutbox = null}) 
             }
             await client.query("update payments set status = 'successful' where id = $1", [paymentId]);
             return {id: paymentId};
-        }).then(sendQueuedSms).then(() => getPayment(paymentId));
+        }).then(() => getPayment(paymentId));
     }
 
     async function failPayment(paymentId, {reason}, actor) {
@@ -404,7 +393,7 @@ export function createMoneyService({pool, paymentPorts = {}, smsOutbox = null}) 
                 await client.query('update payment_splits set payout_id = null where payout_id = $1', [id]);
             }
             return {id};
-        }).then(sendQueuedSms).then(() => getPayout(id));
+        }).then(() => getPayout(id));
     }
 
     /** The finance summary behind the payments dashboard — every figure is a
