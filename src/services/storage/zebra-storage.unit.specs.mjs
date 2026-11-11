@@ -10,12 +10,9 @@ import {createMemoryStorageAdapter} from './adapters/memory-storage.adapter.mjs'
  * base. A real round trip is covered by the e2e suite when the storage service
  * is running.
  *
- * Authentication is currently switched off in the adapter: `accessToken()`
- * returns a placeholder and nothing calls `/auth/token`. The tests that covered
- * the token — that it is cached across uploads, refreshed before expiry, and
- * that bad credentials fail loudly rather than retrying — were removed with it,
- * because a test for behaviour that no longer exists is worse than no test.
- * Restoring the token flow means restoring those three alongside it.
+ * Authentication is on: a static token is sent as is, and a username/password
+ * login is cached across uploads, refreshed before expiry, and fails loudly
+ * on bad credentials.
  */
 function scriptedFetch(handlers) {
     const calls = [];
@@ -75,25 +72,83 @@ describe('Zebra storage adapter', () => {
         assert.ok(upload.options.body instanceof FormData);
     });
 
-    test('does not call the token endpoint while authentication is switched off', async () => {
+    test('sends a static token without calling the login endpoint', async () => {
         const fetchImpl = scriptedFetch([
             tokenHandler,
             {match: '/storage', respond: async () => jsonResponse({urls: ['/storage/x/y.webp']})},
         ]);
-        const adapter = createZebraStorageAdapter({
-            baseUrl: 'http://storage.test',
-            username: 'u',
-            password: 'p',
-            fetchImpl,
-        });
+        const adapter = createZebraStorageAdapter({baseUrl: 'http://storage.test', token: 'static-tok', fetchImpl});
+
+        await adapter.put({name: 'a.webp', contentType: 'image/webp', body: Buffer.from('a')});
+
+        assert.equal(fetchImpl.calls.filter((c) => c.href.includes('/auth/token')).length, 0);
+        assert.equal(fetchImpl.calls[0].options.headers.authorization, 'Bearer static-tok');
+    });
+
+    test('logs in once and reuses the token across uploads', async () => {
+        const fetchImpl = scriptedFetch([
+            {match: '/storage/auth/token', respond: async () => jsonResponse({accessToken: 'tok-1', expiresIn: 3600})},
+            {match: '/storage', respond: async () => jsonResponse({urls: ['/storage/x/y.webp']})},
+        ]);
+        const adapter = createZebraStorageAdapter({baseUrl: 'http://storage.test', username: 'u', password: 'p', fetchImpl});
 
         await adapter.put({name: 'a.webp', contentType: 'image/webp', body: Buffer.from('a')});
         await adapter.put({name: 'b.webp', contentType: 'image/webp', body: Buffer.from('b')});
 
-        assert.equal(
-            fetchImpl.calls.filter((c) => c.href.includes('/auth/token')).length,
-            0,
-            'the credentials are not in play, so nothing should be asking for a token'
+        assert.equal(fetchImpl.calls.filter((c) => c.href.includes('/auth/token')).length, 1);
+        const uploads = fetchImpl.calls.filter((c) => c.href.endsWith('/storage'));
+        assert.equal(uploads[1].options.headers.authorization, 'Bearer tok-1');
+    });
+
+    test('refreshes the token a minute before it expires', async () => {
+        let clock = 0;
+        let logins = 0;
+        const fetchImpl = scriptedFetch([
+            {match: '/storage/auth/token', respond: async () => jsonResponse({accessToken: `tok-${++logins}`, expiresIn: 120})},
+            {match: '/storage', respond: async () => jsonResponse({urls: ['/storage/x/y.webp']})},
+        ]);
+        const adapter = createZebraStorageAdapter({baseUrl: 'http://storage.test', username: 'u', password: 'p', fetchImpl, now: () => clock});
+
+        await adapter.put({name: 'a.webp', contentType: 'image/webp', body: Buffer.from('a')});
+        clock = 30_000;
+        await adapter.put({name: 'b.webp', contentType: 'image/webp', body: Buffer.from('b')});
+        assert.equal(logins, 1, 'still valid with more than a minute left');
+        clock = 70_000;
+        await adapter.put({name: 'c.webp', contentType: 'image/webp', body: Buffer.from('c')});
+        assert.equal(logins, 2, 'inside the last minute it logs in again');
+    });
+
+    test('falls back to the older /auth/token path', async () => {
+        const fetchImpl = scriptedFetch([
+            {match: '/storage/auth/token', respond: async () => jsonResponse({}, 404)},
+            {match: '/auth/token', respond: async () => jsonResponse({accessToken: 'old-tok', expiresIn: 3600})},
+            {match: '/storage', respond: async () => jsonResponse({urls: ['/storage/x/y.webp']})},
+        ]);
+        const adapter = createZebraStorageAdapter({baseUrl: 'http://storage.test', username: 'u', password: 'p', fetchImpl});
+
+        await adapter.put({name: 'a.webp', contentType: 'image/webp', body: Buffer.from('a')});
+
+        const upload = fetchImpl.calls.find((c) => c.href.endsWith('/storage'));
+        assert.equal(upload.options.headers.authorization, 'Bearer old-tok');
+    });
+
+    test('fails loudly when the service rejects the credentials', async () => {
+        const fetchImpl = scriptedFetch([
+            {match: '/auth/token', respond: async () => jsonResponse({message: 'no'}, 401)},
+        ]);
+        const adapter = createZebraStorageAdapter({baseUrl: 'http://storage.test', username: 'u', password: 'bad', fetchImpl});
+
+        await assert.rejects(
+            () => adapter.put({name: 'a.webp', contentType: 'image/webp', body: Buffer.from('a')}),
+            (error) => error.code === 'AUTH_FAILED'
+        );
+    });
+
+    test('refuses to run without any credentials', async () => {
+        const adapter = createZebraStorageAdapter({baseUrl: 'http://storage.test', fetchImpl: scriptedFetch([])});
+        await assert.rejects(
+            () => adapter.put({name: 'a.webp', contentType: 'image/webp', body: Buffer.from('a')}),
+            (error) => error.code === 'NOT_CONFIGURED'
         );
     });
 
@@ -172,7 +227,7 @@ describe('Zebra storage adapter', () => {
 
         await adapter.get('/storage/bafy123/front.webp');
 
-        const read = fetchImpl.calls.find((c) => c.href.includes('/storage/'));
+        const read = fetchImpl.calls.find((c) => c.href.includes('/storage/bafy123'));
         assert.equal(read.href, 'http://storage.test/storage/bafy123/front.webp');
     });
 

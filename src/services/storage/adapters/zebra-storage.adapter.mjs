@@ -2,42 +2,53 @@ import {StorageError} from '../ports.mjs';
 
 /**
  * StoragePort adapter for the Zebra / smartstock-storage service
- * (bfast-functions + Helia). Its contract, confirmed against a running
- * instance:
+ * (bfast-functions + Helia). Its contract:
  *
- *   POST /auth/token   {username, password}      -> {accessToken, expiresIn}
- *   POST /storage      multipart, Bearer token   -> {urls: ['/storage/<cid>/<name>']}
- *   GET  /storage/<cid>/<name>  Bearer token     -> the bytes
+ *   POST /storage/auth/token  {username, password}  -> {accessToken, expiresIn}
+ *        (older deployments serve the same endpoint at /auth/token)
+ *   POST /storage             multipart, Bearer     -> {urls: ['/storage/<cid>/<name>']}
+ *   GET  /storage/<cid>/<name>                      -> the bytes
  *
- * Both reading and writing require a token, so the credentials stay here on
- * the server and HomeMate proxies image reads for the browser rather than
- * handing out storage URLs.
+ * Credentials, in order of preference:
+ *   token             a long-lived token minted in the Zebra console (STORAGE_TOKEN); it is sent as is
+ *   username+password a login that is cached and refreshed a minute before it expires
+ *
+ * Reads are sent with the same token, so they keep working if Zebra stops serving files publicly. HomeMate
+ * proxies image reads for the browser rather than handing out storage URLs.
  */
-export function createZebraStorageAdapter({baseUrl, username, password, fetchImpl = fetch, now = () => Date.now()}) {
+export function createZebraStorageAdapter({baseUrl, token: staticToken, username, password, fetchImpl = fetch, now = () => Date.now()}) {
     if (!baseUrl) throw new StorageError('NOT_CONFIGURED', 'STORAGE_BASE_URL is not set', 500);
 
     const root = baseUrl.replace(/\/+$/, '');
     const withRoot = (path) => `${root}/${path.replace(/^\/+/, '')}`;
-    // let cachedToken = null;
-    // let tokenExpiresAt = 0;
+    let cachedToken = null;
+    let tokenExpiresAt = 0;
+
+    async function login(path) {
+        return fetchImpl(withRoot(path), {
+            method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({username, password}),
+        });
+    }
 
     async function accessToken() {
-        return 'na';
+        if (staticToken) return staticToken;
+        if (!username || !password) {
+            throw new StorageError('NOT_CONFIGURED', 'Set STORAGE_TOKEN, or STORAGE_USERNAME and STORAGE_PASSWORD', 500);
+        }
         // refresh a minute before expiry so a long upload can't straddle it
-        // if (cachedToken && now() < tokenExpiresAt - 60_000) return cachedToken;
-        //
-        // const response = await fetchImpl(`${root}/auth/token`, {
-        //     method: 'POST',
-        //     headers: {'content-type': 'application/json'},
-        //     body: JSON.stringify({username, password}),
-        // });
-        // if (!response.ok) {
-        //     throw new StorageError('AUTH_FAILED', `Storage rejected the service credentials (${response.status})`);
-        // }
-        // const payload = await response.json();
-        // cachedToken = payload.accessToken;
-        // tokenExpiresAt = now() + Number(payload.expiresIn ?? 3600) * 1000;
-        // return cachedToken;
+        if (cachedToken && now() < tokenExpiresAt - 60_000) return cachedToken;
+
+        let response = await login('/storage/auth/token');
+        if (response.status === 404) response = await login('/auth/token');
+        if (!response.ok) {
+            throw new StorageError('AUTH_FAILED', `Storage rejected the service credentials (${response.status})`);
+        }
+        const payload = await response.json();
+        cachedToken = payload.accessToken;
+        tokenExpiresAt = now() + Number(payload.expiresIn ?? 3600) * 1000;
+        return cachedToken;
     }
 
     return {

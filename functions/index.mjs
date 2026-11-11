@@ -21,3 +21,18 @@ if (process.env.DATABASE_URL && process.env.AUTO_MIGRATE !== 'false') {
         console.error('[migrate] FAILED — the server is running against an out-of-date schema:', error);
     }
 }
+
+/**
+ * Pushes go out the moment a notification is committed: the server listens
+ * on the channel the notifications trigger announces on (migration 035).
+ * PUSH_LISTEN=false leaves it to the per-minute sweep (functions/schedule).
+ */
+if (process.env.DATABASE_URL && process.env.PUSH_LISTEN !== 'false') {
+    // Loaded here, after the migrations, and never allowed to stop the server.
+    try {
+        const {pushOutbox} = await import('../src/services/notifications/container.mjs');
+        pushOutbox.listen();
+    } catch (error) {
+        console.error('[push] could not start the notification listener:', error);
+    }
+}
