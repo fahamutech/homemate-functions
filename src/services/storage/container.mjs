@@ -6,7 +6,7 @@ import {StorageError} from './ports.mjs';
  * Composition root for StoragePort. Swapping object stores is a config change
  * plus one adapter file — nothing in the property module knows which one is
  * live. `memory` is the default so the console runs without a storage
- * service; `zebra` needs STORAGE_BASE_URL + credentials.
+ * service; `zebra` needs STORAGE_BASE_URL and either STORAGE_TOKEN or STORAGE_USERNAME + STORAGE_PASSWORD.
  */
 function createStoragePort() {
     const provider = process.env.STORAGE_PROVIDER ?? 'memory';
@@ -17,6 +17,7 @@ function createStoragePort() {
         case 'zebra':
             return createZebraStorageAdapter({
                 baseUrl: process.env.STORAGE_BASE_URL,
+                token: process.env.STORAGE_TOKEN,
                 username: process.env.STORAGE_USERNAME,
                 password: process.env.STORAGE_PASSWORD,
             });
